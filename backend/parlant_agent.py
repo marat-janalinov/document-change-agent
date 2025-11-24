@@ -1227,14 +1227,20 @@ class DocumentChangeAgent:
         target = change.get("target", {})
         payload = change.get("payload", {})
 
-        paragraph_hint = payload.get("paragraph_hint")
-        comment_text = payload.get("comment_text")
+        # Попытка получить paragraph_hint из разных мест
+        paragraph_hint = payload.get("paragraph_hint") or target.get("text") or target.get("paragraph_hint")
+        comment_text = payload.get("comment_text") or payload.get("text") or change.get("description")
 
         if not paragraph_hint or not comment_text:
+            logger.warning(
+                f"ADD_COMMENT: отсутствуют обязательные параметры. "
+                f"target={target}, payload={payload}, change_id={change.get('change_id', 'N/A')}"
+            )
             return {
                 "success": False,
                 "error": "INVALID_PAYLOAD",
-                "message": "Для ADD_COMMENT необходимы payload.paragraph_hint и payload.comment_text",
+                "message": f"Для ADD_COMMENT необходимы payload.paragraph_hint (или target.text) и payload.comment_text. "
+                          f"Получено: paragraph_hint={paragraph_hint}, comment_text={bool(comment_text)}",
             }
 
         matches = await mcp_client.find_text_in_document(
