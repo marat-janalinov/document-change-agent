@@ -1,0 +1,22 @@
+# Пример файла для локальной разработки
+# Скопируйте в docker-compose.override.yml для использования
+
+version: '3.8'
+
+services:
+  backend:
+    volumes:
+      # Монтируем код для hot-reload в разработке
+      - ./backend:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  react-frontend:
+    build:
+      target: builder
+    volumes:
+      # Монтируем код для hot-reload в разработке
+      - ./react:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0 --port 80
+

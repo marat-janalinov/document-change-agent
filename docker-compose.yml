@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  # MCP Word Server (GongRzhe)
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: mcp-word-server
+    environment:
+      - MCP_TRANSPORT=streamable-http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+      - MCP_PATH=/mcp
+    volumes:
+      - data-uploads:/data/uploads
+      - data-outputs:/data/outputs
+      - data-backups:/data/backups
+    networks:
+      - app-network
+    ports:
+      - "9000:8000"
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: document-agent-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-document_agent}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres123}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend (FastAPI + Parlant Agent)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: document-agent-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_SERVER_HOST=mcp-server
+      - MCP_SERVER_PORT=8000
+      - DATA_DIR=/data
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-document_agent}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-change-in-production}
+    volumes:
+      - data-uploads:/data/uploads
+      - data-outputs:/data/outputs
+      - data-backups:/data/backups
+      - data-logs:/data/logs
+      - data-prompts:/data/prompts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
+    networks:
+      - app-network
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload --timeout-keep-alive 600
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # React Frontend
+  react-frontend:
+    build:
+      context: ./react
+      dockerfile: Dockerfile
+    container_name: document-agent-react-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Legacy Frontend (Nginx + Static files) - опционально
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: document-agent-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    environment:
+      - BACKEND_URL=http://backend:8000
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  # Постоянное хранилище для PostgreSQL
+  postgres-data:
+    driver: local
+  # Постоянное хранилище для загруженных файлов
+  # Включает персональные папки пользователей: /data/uploads/{username}/
+  data-uploads:
+    driver: local
+  # Постоянное хранилище для обработанных файлов
+  data-outputs:
+    driver: local
+  # Постоянное хранилище для резервных копий
+  data-backups:
+    driver: local
+  # Постоянное хранилище для логов
+  data-logs:
+    driver: local
+  # Постоянное хранилище для промптов
+  data-prompts:
+    driver: local

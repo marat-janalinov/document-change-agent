@@ -1,0 +1,11 @@
+<svg width="200" height="80" viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background geometric shapes -->
+  <path d="M10 15 L30 15 L40 35 L20 35 Z" fill="#F47920"/>
+  <path d="M25 30 L45 30 L55 50 L35 50 Z" fill="#0A5C6B"/>
+  <path d="M15 45 L35 45 L25 60 L5 60 Z" fill="#2B9EB3"/>
+  
+  <!-- Text -->
+  <text x="70" y="30" font-family="Arial, sans-serif" font-weight="700" font-size="18" fill="#0A5C6B">ФОНД РАЗВИТИЯ</text>
+  <text x="70" y="50" font-family="Arial, sans-serif" font-weight="700" font-size="18" fill="#0A5C6B">ПРОМЫШЛЕННОСТИ</text>
+  <text x="70" y="65" font-family="Arial, sans-serif" font-size="10" fill="#F47920">ҚАЗАҚСТАН</text>
+</svg>

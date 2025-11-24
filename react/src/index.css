@@ -1,0 +1,127 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Industrial Development Fund Kazakhstan Corporate Colors */
+    --industrial-teal: 192 90% 20%;
+    --industrial-orange: 24 95% 53%;
+    --industrial-blue: 189 57% 48%;
+
+    /* Semantic tokens */
+    --background: 0 0% 100%;
+    --foreground: 192 90% 20%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 192 90% 20%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 192 90% 20%;
+
+    --primary: 192 90% 20%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 189 57% 48%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 192 20% 90%;
+    --muted-foreground: 192 30% 40%;
+
+    --accent: 24 95% 53%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 192 30% 85%;
+    --input: 192 30% 85%;
+    --ring: 192 90% 20%;
+
+    --radius: 0.75rem;
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(192 90% 20%), hsl(189 57% 48%));
+    --gradient-accent: linear-gradient(135deg, hsl(24 95% 53%), hsl(24 95% 63%));
+    --gradient-subtle: linear-gradient(180deg, hsl(0 0% 100%), hsl(192 20% 95%));
+
+    /* Shadows */
+    --shadow-soft: 0 2px 8px hsl(192 90% 20% / 0.08);
+    --shadow-elevated: 0 4px 16px hsl(192 90% 20% / 0.12);
+    --shadow-glow: 0 0 24px hsl(24 95% 53% / 0.3);
+
+    /* Transitions */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-fast: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+
+    --sidebar-background: 192 20% 95%;
+    --sidebar-foreground: 192 90% 20%;
+    --sidebar-primary: 192 90% 20%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 189 57% 48%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 192 30% 85%;
+    --sidebar-ring: 24 95% 53%;
+  }
+
+  .dark {
+    --background: 192 60% 8%;
+    --foreground: 0 0% 95%;
+
+    --card: 192 50% 12%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 192 60% 8%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 189 57% 48%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 192 40% 25%;
+    --secondary-foreground: 0 0% 95%;
+
+    --muted: 192 40% 20%;
+    --muted-foreground: 192 20% 70%;
+
+    --accent: 24 95% 53%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 95%;
+
+    --border: 192 40% 25%;
+    --input: 192 40% 25%;
+    --ring: 189 57% 48%;
+
+    --gradient-primary: linear-gradient(135deg, hsl(192 60% 8%), hsl(192 50% 15%));
+    --gradient-accent: linear-gradient(135deg, hsl(24 95% 53%), hsl(24 80% 48%));
+    --gradient-subtle: linear-gradient(180deg, hsl(192 60% 8%), hsl(192 50% 12%));
+
+    --shadow-soft: 0 2px 8px hsl(0 0% 0% / 0.3);
+    --shadow-elevated: 0 4px 16px hsl(0 0% 0% / 0.4);
+    --shadow-glow: 0 0 24px hsl(24 95% 53% / 0.4);
+
+    --sidebar-background: 192 50% 10%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 189 57% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 192 40% 18%;
+    --sidebar-accent-foreground: 0 0% 95%;
+    --sidebar-border: 192 30% 25%;
+    --sidebar-ring: 24 95% 53%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}

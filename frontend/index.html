@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Change Agent</title>
+    <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Заголовок -->
+        <header class="header">
+            <h1>📄 Document Change Agent</h1>
+            <p>Автоматизированное применение изменений к Word документам</p>
+        </header>
+
+        <!-- Вкладки -->
+        <div class="tabs">
+            <button class="tab-btn active" id="tabMain" data-tab="main">
+                🔄 Применение изменений
+            </button>
+            <button class="tab-btn" id="tabCheck" data-tab="check">
+                🔍 Проверка инструкций
+            </button>
+        </div>
+
+        <!-- Вкладка: Проверка инструкций -->
+        <div class="tab-content hidden" id="tabContentCheck">
+            <div class="section">
+                <h2>Проверка файла на наличие инструкций</h2>
+                <p class="info-text">Загрузите файл для проверки наличия инструкций по изменению документов</p>
+                
+                <div class="upload-box" style="max-width: 600px; margin: 20px auto;">
+                    <h3>📄 Файл для проверки</h3>
+                    <div class="upload-area" id="uploadCheckFile">
+                        <input type="file" id="fileCheck" accept=".docx" hidden>
+                        <label for="fileCheck" class="upload-label">
+                            <div class="upload-icon">📁</div>
+                            <div>Перетащите файл или нажмите</div>
+                            <div class="file-info">Поддерживается: .docx</div>
+                        </label>
+                    </div>
+                    <div class="file-status" id="statusCheckFile"></div>
+                    <select id="selectCheckFile" class="file-select">
+                        <option value="">— выберите файл —</option>
+                    </select>
+                </div>
+
+                <div class="action-buttons">
+                    <button class="btn btn-primary" id="btnCheckInstructions" disabled>
+                        🔍 Проверить файл
+                    </button>
+                </div>
+
+                <div class="check-results hidden" id="checkResults">
+                    <h3>Результаты проверки</h3>
+                    <div class="check-summary" id="checkSummary"></div>
+                    <div class="check-details" id="checkDetails"></div>
+                    <div class="action-buttons">
+                        <button class="btn btn-secondary" id="btnExportResults">
+                            💾 Экспортировать в текстовый файл
+                        </button>
+                        <button class="btn btn-secondary" id="btnNewCheck">
+                            🔄 Новая проверка
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Вкладка: Применение изменений -->
+        <div class="tab-content" id="tabContentMain">
+        <!-- Навигация по шагам -->
+        <div class="steps">
+            <div class="step active" id="step1">
+                <div class="step-number">1</div>
+                <div class="step-title">Загрузка файлов</div>
+            </div>
+            <div class="step" id="step2">
+                <div class="step-number">2</div>
+                <div class="step-title">Обработка</div>
+            </div>
+            <div class="step" id="step3">
+                <div class="step-number">3</div>
+                <div class="step-title">Результаты</div>
+            </div>
+        </div>
+
+        <!-- Шаг 1: Загрузка файлов -->
+        <div class="section" id="section-upload">
+            <h2>Шаг 1: Загрузка документов</h2>
+            
+            <!-- Кнопка генерации тестовых файлов -->
+            <div class="test-files-section">
+                <button class="btn btn-secondary" id="btnGenerateTestFiles">
+                    🎲 Сгенерировать тестовые файлы
+                </button>
+                <p class="info-text">Создаст пример документа с инструкциями изменений</p>
+            </div>
+
+            <div class="upload-grid">
+                <!-- Исходный документ -->
+                <div class="upload-box">
+                    <h3>📄 Исходный документ</h3>
+                    <div class="upload-area" id="uploadSource">
+                        <input type="file" id="fileSource" accept=".docx" hidden>
+                        <label for="fileSource" class="upload-label">
+                            <div class="upload-icon">📁</div>
+                            <div>Перетащите файл или нажмите</div>
+                            <div class="file-info">Поддерживается: .docx</div>
+                        </label>
+                    </div>
+                    <div class="file-status" id="statusSource"></div>
+                    <select id="selectSourceFile" class="file-select">
+                        <option value="">— выберите файл —</option>
+                    </select>
+                </div>
+
+                <!-- Файл с инструкциями -->
+                <div class="upload-box">
+                    <h3>📋 Файл с инструкциями</h3>
+                    <div class="upload-area" id="uploadChanges">
+                        <input type="file" id="fileChanges" accept=".docx" hidden>
+                        <label for="fileChanges" class="upload-label">
+                            <div class="upload-icon">📁</div>
+                            <div>Перетащите файл или нажмите</div>
+                            <div class="file-info">Поддерживается: .docx</div>
+                        </label>
+                    </div>
+                    <div class="file-status" id="statusChanges"></div>
+                    <select id="selectChangesFile" class="file-select">
+                        <option value="">— выберите файл —</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-primary" id="btnStartProcessing" disabled>
+                    ▶️ Начать обработку
+                </button>
+            </div>
+        </div>
+
+        <!-- Шаг 2: Обработка -->
+        <div class="section hidden" id="section-processing">
+            <h2>Шаг 2: Применение изменений</h2>
+            
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressBar"></div>
+                </div>
+                <div class="progress-text" id="progressText">0%</div>
+            </div>
+
+            <div class="status-box">
+                <h3>Статус выполнения</h3>
+                <div id="statusLog" class="status-log">
+                    <div class="log-entry">Инициализация...</div>
+                </div>
+            </div>
+
+            <div class="changes-list" id="changesList">
+                <!-- Динамически заполняется -->
+            </div>
+        </div>
+
+        <!-- Шаг 3: Результаты -->
+        <div class="section hidden" id="section-results">
+            <h2>Шаг 3: Результаты обработки</h2>
+            
+            <div class="results-summary" id="resultsSummary">
+                <!-- Динамически заполняется -->
+            </div>
+
+            <div class="download-section">
+                <h3>Файлы для скачивания</h3>
+                <div class="download-grid" id="downloadList">
+                    <!-- Динамически заполняется -->
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-secondary" id="btnNewProcessing">
+                    🔄 Начать новую обработку
+                </button>
+            </div>
+        </div>
+        </div>
+        <!-- Конец вкладки: Применение изменений -->
+
+        <!-- Футер -->
+        <footer class="footer">
+            <p>Powered by Parlant Framework + MCP Word Server</p>
+        </footer>
+    </div>
+
+    <script src="static/app.js"></script>
+</body>
+</html>
