@@ -6,8 +6,12 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     git \
     ca-certificates \
+    openssl \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
+
+# Обновление pip и certifi для Python
+RUN pip install --upgrade pip certifi
 
 # Клонирование Office-Word-MCP-Server
 RUN git clone https://github.com/GongRzhe/Office-Word-MCP-Server.git .
