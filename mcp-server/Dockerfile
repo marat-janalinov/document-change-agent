@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
 
-# Обновление pip и certifi для Python
-RUN pip install --upgrade pip certifi
+# Обновление pip и certifi для Python (с отключением SSL проверки для обновления)
+RUN pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --upgrade pip certifi
 
 # Клонирование Office-Word-MCP-Server
 RUN git clone https://github.com/GongRzhe/Office-Word-MCP-Server.git .
