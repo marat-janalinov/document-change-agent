@@ -165,7 +165,13 @@ class DocumentChangeAgent:
             raise RuntimeError("OPENAI_API_KEY не найден. Укажите ключ в .env.")
 
         # Увеличенный timeout для больших документов
-        self._openai_http_client = httpx.AsyncClient(timeout=300.0)  # 5 минут
+        # Отключение проверки SSL для httpx (если есть проблемы с сертификатами)
+        # ВАЖНО: Это временное решение для серверов с проблемами SSL
+        verify_ssl = os.environ.get("OPENAI_VERIFY_SSL", "true").lower() == "true"
+        self._openai_http_client = httpx.AsyncClient(
+            timeout=300.0,  # 5 минут
+            verify=verify_ssl,  # Отключить проверку SSL если нужно
+        )
         try:
             self.openai_client = AsyncOpenAI(
                 api_key=openai_key,

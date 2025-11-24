@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y \
 # Обновление pip и certifi для Python (с отключением SSL проверки для обновления)
 RUN pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --upgrade pip certifi
 
+# Обновление certifi для Python (критично для работы с OpenAI API)
+RUN python -m certifi
+
 # Копирование requirements и установка зависимостей
 COPY requirements.txt .
 RUN pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --no-cache-dir -r requirements.txt
