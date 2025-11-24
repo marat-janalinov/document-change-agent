@@ -3,17 +3,37 @@
 """
 import os
 from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Integer, Text, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
 
+# Загрузка переменных окружения из .env файла
+# Ищем .env файл в корне проекта (на уровень выше backend/)
+env_path = Path(__file__).parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    # Если .env не найден в корне, пробуем загрузить из текущей директории
+    load_dotenv()
+
+# Получение параметров подключения к базе данных из переменных окружения
+POSTGRES_DB = os.getenv("POSTGRES_DB", "document_agent")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres123")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+
 # URL базы данных PostgreSQL
-# В Docker используем переменную окружения DATABASE_URL
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres123@localhost:5432/document_agent"
-)
+# Используем DATABASE_URL из .env, если задан, иначе формируем из отдельных параметров
+database_url_from_env = os.getenv("DATABASE_URL")
+if database_url_from_env:
+    DATABASE_URL = database_url_from_env
+else:
+    # Формируем URL из отдельных параметров
+    DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
 # Создание движка базы данных PostgreSQL
 engine = create_engine(
