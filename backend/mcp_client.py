@@ -9,6 +9,7 @@ import os
 import shutil
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import logging
@@ -18,6 +19,16 @@ from docx.text.paragraph import Paragraph
 from fastmcp.client import Client
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения из .env файла
+# Ищем .env файл в корне проекта (на уровень выше backend/)
+env_path = Path(__file__).parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    # Если .env не найден в корне, пробуем загрузить из текущей директории
+    load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -375,10 +386,21 @@ class MCPClient:
         new_paragraph = self._insert_paragraph_xml(
             paragraph, f"[ANNOTATION by {author}] {comment_text}"
         )
-        try:
-            new_paragraph.style = document.styles["Comment"]  # type: ignore[index]
-        except KeyError:
-            new_paragraph.style = document.styles["Normal"]  # type: ignore[index]
+        
+        # Безопасная установка стиля с проверкой наличия
+        style_set = False
+        for style_name in ["Comment", "Normal", "Default Paragraph Font"]:
+            try:
+                if style_name in document.styles:
+                    new_paragraph.style = document.styles[style_name]  # type: ignore[index]
+                    style_set = True
+                    break
+            except (KeyError, ValueError):
+                continue
+        
+        # Если ни один стиль не найден, оставляем без стиля (используется стиль по умолчанию)
+        if not style_set:
+            logger.warning(f"Не удалось установить стиль для комментария в документе {filename}, используется стиль по умолчанию")
 
         document.save(filename)
         return f"COMMENT-{uuid.uuid4()}"
@@ -417,10 +439,30 @@ class MCPClient:
             paragraph = self._insert_paragraph_xml(anchor_paragraph, text)
 
         if style:
+            # Безопасная установка стиля с проверкой наличия
+            style_set = False
+            # Пробуем сначала указанный стиль
             try:
-                paragraph.style = document.styles[style]  # type: ignore[index]
-            except KeyError:
-                paragraph.style = document.styles["Normal"]  # type: ignore[index]
+                if style in document.styles:
+                    paragraph.style = document.styles[style]  # type: ignore[index]
+                    style_set = True
+            except (KeyError, ValueError):
+                pass
+            
+            # Если не удалось, пробуем альтернативные стили
+            if not style_set:
+                for fallback_style in ["Normal", "Default Paragraph Font"]:
+                    try:
+                        if fallback_style in document.styles:
+                            paragraph.style = document.styles[fallback_style]  # type: ignore[index]
+                            style_set = True
+                            logger.debug(f"Использован альтернативный стиль '{fallback_style}' вместо '{style}'")
+                            break
+                    except (KeyError, ValueError):
+                        continue
+                
+                if not style_set:
+                    logger.warning(f"Не удалось установить стиль '{style}' и альтернативы для параграфа в документе {filename}")
 
         document.save(filename)
 

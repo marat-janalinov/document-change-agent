@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # MCP Word Server (GongRzhe)
   mcp-server:
@@ -13,9 +11,9 @@ services:
       - MCP_PORT=8000
       - MCP_PATH=/mcp
     volumes:
-      - data-uploads:/data/uploads
-      - data-outputs:/data/outputs
-      - data-backups:/data/backups
+      - ./data/uploads:/data/uploads
+      - ./data/outputs:/data/outputs
+      - ./data/backups:/data/backups
     networks:
       - app-network
     ports:
@@ -67,11 +65,11 @@ services:
       - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-document_agent}}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-change-in-production}
     volumes:
-      - data-uploads:/data/uploads
-      - data-outputs:/data/outputs
-      - data-backups:/data/backups
-      - data-logs:/data/logs
-      - data-prompts:/data/prompts
+      - ./data/uploads:/data/uploads
+      - ./data/outputs:/data/outputs
+      - ./data/backups:/data/backups
+      - ./data/logs:/data/logs
+      - ./data/prompts:/data/prompts
     depends_on:
       postgres:
         condition: service_healthy
@@ -123,22 +121,11 @@ networks:
     driver: bridge
 
 volumes:
-  # Постоянное хранилище для PostgreSQL
+  # Постоянное хранилище для PostgreSQL (оставляем named volume для БД)
   postgres-data:
     driver: local
-  # Постоянное хранилище для загруженных файлов
-  # Включает персональные папки пользователей: /data/uploads/{username}/
-  data-uploads:
-    driver: local
-  # Постоянное хранилище для обработанных файлов
-  data-outputs:
-    driver: local
-  # Постоянное хранилище для резервных копий
-  data-backups:
-    driver: local
-  # Постоянное хранилище для логов
-  data-logs:
-    driver: local
-  # Постоянное хранилище для промптов
-  data-prompts:
-    driver: local
+  # Остальные данные теперь хранятся в bind mounts (./data/*)
+  # Это позволяет:
+  # - Прямой доступ с хоста
+  # - Простое резервное копирование
+  # - Управление через стандартные инструменты Linux

@@ -7,6 +7,7 @@ import logging
 import os
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
@@ -14,8 +15,18 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 from openai import AsyncOpenAI
+from dotenv import load_dotenv
 
 from mcp_client import MCPTextMatch, mcp_client
+
+# Загрузка переменных окружения из .env файла
+# Ищем .env файл в корне проекта (на уровень выше backend/)
+env_path = Path(__file__).parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    # Если .env не найден в корне, пробуем загрузить из текущей директории
+    load_dotenv()
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -140,7 +151,9 @@ class DocumentChangeAgent:
     def __init__(self):
         self.openai_client: Optional[AsyncOpenAI] = None
         self._openai_http_client: Optional[httpx.AsyncClient] = None
-        self.model_name: str = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+        # Чтение модели из переменных окружения (загружены из .env)
+        self.model_name: str = os.environ.get("OPENAI_MODEL", "gpt-4o")
+        logger.info(f"Инициализация LLM агента с моделью: {self.model_name}")
         self._patch_openai_httpx()
 
     async def initialize(self) -> None:
@@ -164,7 +177,8 @@ class DocumentChangeAgent:
             raise
 
         if not self.model_name:
-            self.model_name = "gpt-4.1-mini"
+            self.model_name = "gpt-4o"
+            logger.warning("OPENAI_MODEL не задан, используется модель по умолчанию: gpt-4o")
 
         logger.info("LLM агент инициализирован")
 
@@ -228,7 +242,7 @@ class DocumentChangeAgent:
                     {"role": "user", "content": full_prompt},
                 ],
                 temperature=0,
-                max_tokens=32768,  # Увеличено до 32K для документов с большим количеством инструкций
+                max_tokens=16384,  # Максимальное значение для completion tokens (gpt-4o поддерживает до 16384)
                 response_format={"type": "json_object"},
             )
             logger.info("Ответ от LLM получен успешно")
@@ -1298,7 +1312,38 @@ class DocumentChangeAgent:
         if text:
             new_para.add_run(text)
         if style:
-            new_para.style = style
+            # Безопасная установка стиля с проверкой наличия
+            try:
+                # Получаем документ из paragraph
+                doc = paragraph._parent  # noqa: SLF001
+                if hasattr(doc, 'styles'):
+                    # Пробуем сначала указанный стиль
+                    if style in doc.styles:
+                        new_para.style = style
+                    else:
+                        # Пробуем альтернативные стили
+                        fallback_styles = []
+                        if "Heading" in style:
+                            # Для заголовков пробуем разные уровни
+                            for level in range(1, 10):
+                                fallback_styles.append(f"Heading {level}")
+                        fallback_styles.extend(["Normal", "Default Paragraph Font"])
+                        
+                        style_set = False
+                        for fallback_style in fallback_styles:
+                            try:
+                                if fallback_style in doc.styles:
+                                    new_para.style = fallback_style
+                                    style_set = True
+                                    logger.debug(f"Использован альтернативный стиль '{fallback_style}' вместо '{style}'")
+                                    break
+                            except (KeyError, ValueError, AttributeError):
+                                continue
+                        
+                        if not style_set:
+                            logger.warning(f"Не удалось установить стиль '{style}' и альтернативы, параграф будет без стиля")
+            except Exception as e:
+                logger.warning(f"Ошибка при установке стиля '{style}': {e}, параграф будет без стиля")
         return new_para
 
     def _find_paragraph_index_by_text(

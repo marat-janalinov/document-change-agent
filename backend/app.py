@@ -8,18 +8,29 @@ import os
 import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from generate_test_files import generate_test_files
 from mcp_client import mcp_client
 from parlant_agent import document_agent
+
+# Загрузка переменных окружения из .env файла
+# Ищем .env файл в корне проекта (на уровень выше backend/)
+env_path = Path(__file__).parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    # Если .env не найден в корне, пробуем загрузить из текущей директории
+    load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
@@ -30,10 +41,24 @@ logger = logging.getLogger(__name__)
 
 
 # Конфигурация
-DATA_DIR = os.getenv("DATA_DIR", "/data")
+# Нормализуем DATA_DIR: если указан относительный путь, преобразуем в абсолютный
+data_dir_raw = os.getenv("DATA_DIR", "/data")
+logger.info(f"DATA_DIR из переменной окружения: '{data_dir_raw}'")
+
+if data_dir_raw.startswith("./") or (not os.path.isabs(data_dir_raw) and not data_dir_raw.startswith("/")):
+    # Относительный путь - преобразуем в абсолютный относительно корня проекта
+    base_path = Path(__file__).parent.parent
+    DATA_DIR = str(base_path / data_dir_raw.lstrip("./"))
+    logger.info(f"DATA_DIR преобразован из относительного пути в: {DATA_DIR}")
+else:
+    DATA_DIR = data_dir_raw
+    logger.info(f"DATA_DIR используется как абсолютный путь: {DATA_DIR}")
+
 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
 OUTPUTS_DIR = os.path.join(DATA_DIR, "outputs")
 BACKUPS_DIR = os.path.join(DATA_DIR, "backups")
+
+logger.info(f"Итоговые пути: DATA_DIR={DATA_DIR}, UPLOADS_DIR={UPLOADS_DIR}")
 
 # Создание директорий
 for dir_path in [UPLOADS_DIR, OUTPUTS_DIR, BACKUPS_DIR]:
@@ -58,6 +83,29 @@ def ensure_user_directory(username: str) -> str:
     """
     user_dir = get_user_directory(username)
     os.makedirs(user_dir, exist_ok=True)
+    return user_dir
+
+
+def ensure_user_directories(username: str) -> str:
+    """
+    Создание всех необходимых персональных директорий пользователя:
+    - основная директория пользователя
+    - поддиректория source (для исходных файлов)
+    - поддиректория changes (для файлов с инструкциями)
+    
+    Возвращает путь к основной директории пользователя.
+    """
+    user_dir = ensure_user_directory(username)
+    
+    # Создаем поддиректории source и changes
+    source_dir = os.path.join(user_dir, "source")
+    changes_dir = os.path.join(user_dir, "changes")
+    
+    os.makedirs(source_dir, exist_ok=True)
+    os.makedirs(changes_dir, exist_ok=True)
+    
+    logger.info(f"Созданы директории для пользователя {username}: {user_dir}, {source_dir}, {changes_dir}")
+    
     return user_dir
 
 
@@ -214,9 +262,10 @@ async def startup_event():
             created_count = 0
             for user in users:
                 try:
-                    user_dir = ensure_user_directory(user.username)
+                    user_dir = ensure_user_directories(user.username)
                     if not os.path.exists(user_dir):
                         created_count += 1
+                    logger.debug(f"Проверены/созданы папки для пользователя {user.username}: {user_dir}")
                 except Exception as e:
                     logger.warning(f"Не удалось создать папку для пользователя {user.username}: {e}")
             db.close()
@@ -326,8 +375,8 @@ async def upload_file(
                 detail="Поддерживаются только .docx файлы"
             )
 
-        # Создание/проверка персональной директории пользователя
-        user_dir = ensure_user_directory(current_user.username)
+        # Создание/проверка персональной директории пользователя и всех поддиректорий
+        user_dir = ensure_user_directories(current_user.username)
         logger.info(f"Директория пользователя: {user_dir}")
         
         # Нормализация file_type (убираем пробелы, приводим к нижнему регистру)
@@ -337,17 +386,14 @@ async def upload_file(
         # Определяем подпапку в зависимости от типа файла
         if file_type_normalized == "source":
             target_dir = os.path.join(user_dir, "source")
-            os.makedirs(target_dir, exist_ok=True)
             logger.info(f"✓ Файл будет сохранен в папку SOURCE: {target_dir}")
         elif file_type_normalized == "changes":
             target_dir = os.path.join(user_dir, "changes")
-            os.makedirs(target_dir, exist_ok=True)
             logger.info(f"✓ Файл будет сохранен в папку CHANGES: {target_dir}")
         else:
             # Если file_type не указан или неверный, используем source по умолчанию
             logger.warning(f"⚠ Неизвестный тип файла '{file_type_normalized}', используем SOURCE по умолчанию")
             target_dir = os.path.join(user_dir, "source")
-            os.makedirs(target_dir, exist_ok=True)
             file_type_normalized = "source"  # Устанавливаем правильный тип для дальнейшего использования
         
         original_name = file.filename
@@ -450,9 +496,9 @@ async def process_documents(
             import shutil
             from datetime import datetime
             
-            user_dir = get_user_directory(current_user.username)
+            # Убеждаемся, что все директории пользователя созданы
+            user_dir = ensure_user_directories(current_user.username)
             source_dir = os.path.join(user_dir, "source")
-            os.makedirs(source_dir, exist_ok=True)
             
             # Создаем имя резервной копии с timestamp
             base_name = os.path.splitext(request.source_filename)[0]
@@ -969,8 +1015,8 @@ async def export_check_results(
 # Список доступных файлов
 @app.get("/api/files")
 async def list_files(
-    current_user: Optional[User] = Depends(get_current_user),
-    file_type: Optional[str] = None  # "source" или "changes"
+    file_type: Optional[str] = Query(None, description="Тип файла: 'source' или 'changes'"),
+    current_user: Optional[User] = Depends(get_current_user)
 ):
     """
     Список файлов пользователя из его персональной директории.
@@ -982,6 +1028,11 @@ async def list_files(
     user_dir = get_user_directory(current_user.username)
     
     logger.info(f"Запрос списка файлов для пользователя {current_user.username}, file_type={file_type}")
+    logger.info(f"DATA_DIR: {DATA_DIR}")
+    logger.info(f"UPLOADS_DIR: {UPLOADS_DIR}")
+    logger.info(f"Директория пользователя: {user_dir}")
+    logger.info(f"Абсолютный путь к директории пользователя: {os.path.abspath(user_dir)}")
+    logger.info(f"Существует ли директория пользователя: {os.path.exists(user_dir)}")
     
     files = {
         "uploads": [],
@@ -993,17 +1044,30 @@ async def list_files(
     if file_type in ["source", "changes"]:
         subdir = os.path.join(user_dir, file_type)
         logger.info(f"Поиск файлов в подпапке: {subdir}")
+        logger.info(f"Абсолютный путь: {os.path.abspath(subdir)}")
+        logger.info(f"Существует ли директория: {os.path.exists(subdir)}")
+        
+        if not os.path.exists(subdir):
+            # Создаем поддиректорию, если она не существует
+            logger.info(f"Создание поддиректории {subdir}")
+            os.makedirs(subdir, exist_ok=True)
+        
         if os.path.exists(subdir):
-            all_files = os.listdir(subdir)
-            # Фильтруем файлы: только .docx и исключаем файлы резервного копирования
-            docx_files = [
-                f for f in all_files 
-                if f.endswith('.docx') and '_backup_' not in f
-            ]
-            files["uploads"] = docx_files
-            logger.info(f"Найдено {len(docx_files)} файлов в папке {file_type} (исключены backup файлы): {docx_files}")
+            try:
+                all_files = os.listdir(subdir)
+                logger.info(f"Все файлы в директории {subdir}: {all_files}")
+                # Фильтруем файлы: только .docx и исключаем файлы резервного копирования
+                docx_files = [
+                    f for f in all_files 
+                    if f.endswith('.docx') and '_backup_' not in f and os.path.isfile(os.path.join(subdir, f))
+                ]
+                files["uploads"] = docx_files
+                logger.info(f"Найдено {len(docx_files)} файлов в папке {file_type} (исключены backup файлы): {docx_files}")
+            except Exception as e:
+                logger.error(f"Ошибка при чтении директории {subdir}: {e}", exc_info=True)
+                files["uploads"] = []
         else:
-            logger.warning(f"Подпапка {subdir} не существует")
+            logger.warning(f"Подпапка {subdir} не существует и не была создана")
     else:
         # Если тип не указан, возвращаем все файлы из корня папки пользователя
         if os.path.exists(user_dir):

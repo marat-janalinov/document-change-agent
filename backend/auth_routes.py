@@ -6,7 +6,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
-from database import get_db_session, User, init_db
+from database import get_db_session, User, init_db, OperationLog
 from auth import (
     verify_password,
     get_password_hash,
@@ -218,19 +218,32 @@ async def create_user(
     db.commit()
     db.refresh(new_user)
     
-    # Создание персональной директории пользователя
+    # Создание всех необходимых персональных директорий пользователя
     try:
         import os
         import re
+        import logging
+        logger = logging.getLogger(__name__)
+        
         DATA_DIR = os.getenv("DATA_DIR", "/data")
         UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
         safe_username = re.sub(r'[^A-Za-z0-9_-]', '_', new_user.username)
         user_dir = os.path.join(UPLOADS_DIR, safe_username)
+        
+        # Создаем основную директорию пользователя
         os.makedirs(user_dir, exist_ok=True)
+        
+        # Создаем поддиректории source и changes
+        source_dir = os.path.join(user_dir, "source")
+        changes_dir = os.path.join(user_dir, "changes")
+        os.makedirs(source_dir, exist_ok=True)
+        os.makedirs(changes_dir, exist_ok=True)
+        
+        logger.info(f"Созданы директории для пользователя {new_user.username}: {user_dir}, {source_dir}, {changes_dir}")
     except Exception as e:
         # Логируем ошибку, но не прерываем создание пользователя
         import logging
-        logging.getLogger(__name__).warning(f"Не удалось создать директорию для пользователя {new_user.username}: {e}")
+        logging.getLogger(__name__).warning(f"Не удалось создать директории для пользователя {new_user.username}: {e}")
     
     return UserResponse(**new_user.to_dict())
 
@@ -313,6 +326,19 @@ async def delete_user(
             detail="Нельзя удалить самого себя"
         )
     
+    # Удаляем все связанные записи в operation_logs
+    try:
+        logs_count = db.query(OperationLog).filter(OperationLog.user_id == user_id).count()
+        if logs_count > 0:
+            db.query(OperationLog).filter(OperationLog.user_id == user_id).delete()
+            import logging
+            logging.getLogger(__name__).info(f"Удалено {logs_count} записей логов для пользователя {user.username}")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Ошибка при удалении логов пользователя {user.username}: {e}")
+        # Продолжаем удаление пользователя даже если не удалось удалить логи
+    
+    # Удаляем пользователя
     db.delete(user)
     db.commit()
     

@@ -72,7 +72,7 @@ def create_users():
             db.commit()
             db.refresh(user)
             
-            # Создание персональной директории пользователя
+            # Создание всех необходимых персональных директорий пользователя
             try:
                 import os
                 import re
@@ -80,10 +80,19 @@ def create_users():
                 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
                 safe_username = re.sub(r'[^A-Za-z0-9_-]', '_', user.username)
                 user_dir = os.path.join(UPLOADS_DIR, safe_username)
+                
+                # Создаем основную директорию пользователя
                 os.makedirs(user_dir, exist_ok=True)
-                print(f"✓ Создана директория для пользователя {user_data['username']}")
+                
+                # Создаем поддиректории source и changes
+                source_dir = os.path.join(user_dir, "source")
+                changes_dir = os.path.join(user_dir, "changes")
+                os.makedirs(source_dir, exist_ok=True)
+                os.makedirs(changes_dir, exist_ok=True)
+                
+                print(f"✓ Созданы директории для пользователя {user_data['username']}: {user_dir}, {source_dir}, {changes_dir}")
             except Exception as e:
-                print(f"⚠ Не удалось создать директорию для {user_data['username']}: {e}")
+                print(f"⚠ Не удалось создать директории для {user_data['username']}: {e}")
             
             created_count += 1
             print(f"✓ Создан пользователь {user_data['username']} ({user_data['role']}): {user_data['email']} / {user_data['password']}")
