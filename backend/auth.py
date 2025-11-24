@@ -4,13 +4,24 @@
 import os
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from dotenv import load_dotenv
 from database import get_db_session, User
+
+# Загрузка переменных окружения из .env файла
+# Ищем .env файл в корне проекта (на уровень выше backend/)
+env_path = Path(__file__).parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    # Если .env не найден в корне, пробуем загрузить из текущей директории
+    load_dotenv()
 
 # Настройки JWT
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
