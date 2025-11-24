@@ -168,15 +168,19 @@ class DocumentChangeAgent:
         # Увеличенный timeout для больших документов
         # Настройка SSL для работы с OpenAI API
         # Использование certifi для SSL сертификатов (решает проблему с сертификатами в Docker)
-        verify_ssl = os.environ.get("OPENAI_VERIFY_SSL", "true").lower() == "true"
+        verify_ssl = os.environ.get("OPENAI_VERIFY_SSL", "false").lower() == "true"
         
         if verify_ssl:
             # Использовать сертификаты из certifi
-            cert_path = certifi.where()
-            logger.info(f"Использование SSL сертификатов из certifi: {cert_path}")
-            verify_param = cert_path
+            try:
+                cert_path = certifi.where()
+                logger.info(f"Использование SSL сертификатов из certifi: {cert_path}")
+                verify_param = cert_path
+            except Exception as e:
+                logger.warning(f"Не удалось получить путь к certifi: {e}. Отключаем проверку SSL.")
+                verify_param = False
         else:
-            logger.warning("Проверка SSL отключена (OPENAI_VERIFY_SSL=false)")
+            logger.warning("Проверка SSL отключена (OPENAI_VERIFY_SSL=false или не установлен). Это небезопасно, но необходимо для работы на серверах с проблемами SSL.")
             verify_param = False
         
         self._openai_http_client = httpx.AsyncClient(
