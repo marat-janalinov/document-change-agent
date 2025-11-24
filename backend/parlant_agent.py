@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
+import certifi
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
@@ -165,12 +166,22 @@ class DocumentChangeAgent:
             raise RuntimeError("OPENAI_API_KEY не найден. Укажите ключ в .env.")
 
         # Увеличенный timeout для больших документов
-        # Отключение проверки SSL для httpx (если есть проблемы с сертификатами)
-        # ВАЖНО: Это временное решение для серверов с проблемами SSL
+        # Настройка SSL для работы с OpenAI API
+        # Использование certifi для SSL сертификатов (решает проблему с сертификатами в Docker)
         verify_ssl = os.environ.get("OPENAI_VERIFY_SSL", "true").lower() == "true"
+        
+        if verify_ssl:
+            # Использовать сертификаты из certifi
+            cert_path = certifi.where()
+            logger.info(f"Использование SSL сертификатов из certifi: {cert_path}")
+            verify_param = cert_path
+        else:
+            logger.warning("Проверка SSL отключена (OPENAI_VERIFY_SSL=false)")
+            verify_param = False
+        
         self._openai_http_client = httpx.AsyncClient(
             timeout=300.0,  # 5 минут
-            verify=verify_ssl,  # Отключить проверку SSL если нужно
+            verify=verify_param,  # Использовать certifi сертификаты или отключить проверку
         )
         try:
             self.openai_client = AsyncOpenAI(
