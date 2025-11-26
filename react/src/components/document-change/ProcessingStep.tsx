@@ -125,7 +125,7 @@ export function ProcessingStep({ progress, statusLog, changes }: ProcessingStepP
                         Операция: {change.operation}
                       </div>
                       {change.description && (
-                        <div className="text-sm mt-1">{change.description}</div>
+                        <div className="text-sm mt-1 break-words">{change.description}</div>
                       )}
                       {change.details && (
                         <div className="text-xs text-muted-foreground mt-2 whitespace-pre-wrap">

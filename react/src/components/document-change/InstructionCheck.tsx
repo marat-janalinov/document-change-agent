@@ -291,7 +291,10 @@ export function InstructionCheck() {
                         </div>
                         {change.description && (
                           <div className="text-muted-foreground mb-1">
-                            Описание: {change.description}
+                            <div className="flex items-start gap-2">
+                              <span className="font-medium shrink-0">Описание:</span>
+                              <span className="break-words">{change.description}</span>
+                            </div>
                           </div>
                         )}
                       </div>
