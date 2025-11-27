@@ -752,13 +752,14 @@ class DocumentChangeAgent:
             doc.save(filename)
 
             # Добавляем аннотацию к первому затронутому параграфу
-            if change.get("annotation", True) and affected_paragraphs:
-                first_para_idx = min(affected_paragraphs)
+        if change.get("annotation", True) and affected_paragraphs:
+            # Добавляем аннотации к каждому измененному параграфу, а не только к первому
+            for para_idx in affected_paragraphs:
                 await self._add_annotation(
                     filename,
-                    first_para_idx,
+                    para_idx,
                     change,
-                    extra=f'"{target_text}" → "{new_text}" (заменено {replaced_count} раз)',
+                    extra=f'"{target_text}" → "{new_text}"',
                 )
 
             return {
