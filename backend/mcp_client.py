@@ -396,12 +396,33 @@ class MCPClient:
         self._ensure_document_exists(filename)
         document = Document(filename)
 
-        if paragraph_index < 0 or paragraph_index >= len(document.paragraphs):
-            raise RuntimeError(
-                f"Paragraph index {paragraph_index} is out of bounds for document {filename}"
-            )
+        # Обработка специальных случаев для индексов
+        if paragraph_index < 0:
+            # Для отрицательных индексов (таблицы) добавляем комментарий после первой таблицы
+            target_paragraph = None
+            for element in document.element.body:
+                if element.tag.endswith('tbl'):  # Это таблица
+                    # Ищем следующий параграф после таблицы
+                    next_element = element.getnext()
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        # Находим индекс этого параграфа
+                        for i, para in enumerate(document.paragraphs):
+                            if para._element == next_element:
+                                target_paragraph = para
+                                break
+                    break
+            
+            if target_paragraph is None:
+                # Если не нашли подходящий параграф, добавляем в конец
+                target_paragraph = document.add_paragraph()
+            
+            paragraph = target_paragraph
+        elif paragraph_index >= len(document.paragraphs):
+            # Добавляем новый параграф в конец
+            paragraph = document.add_paragraph()
+        else:
+            paragraph = document.paragraphs[paragraph_index]
 
-        paragraph = document.paragraphs[paragraph_index]
         new_paragraph = self._insert_paragraph_xml(
             paragraph, f"[ANNOTATION by {author}] {comment_text}"
         )
