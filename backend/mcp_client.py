@@ -163,9 +163,21 @@ class MCPClient:
                 continue
 
             paragraph_index = entry.get("paragraph_index")
+            
+            # Обрабатываем совпадения в таблицах
             if paragraph_index is None:
-                # Skip matches that point to tables or unknown locations for now
-                continue
+                # Проверяем, есть ли информация о таблице
+                table_info = entry.get("table_info") or entry.get("location")
+                if table_info:
+                    # Для совпадений в таблицах используем специальный индекс
+                    # Это позволит системе найти текст в таблицах
+                    logger.info(f"Найден текст в таблице: {entry}")
+                    # Используем отрицательный индекс для обозначения совпадений в таблицах
+                    paragraph_index = -1
+                else:
+                    # Пропускаем только если совсем нет информации о местоположении
+                    logger.warning(f"Пропущено совпадение без информации о местоположении: {entry}")
+                    continue
 
             context = entry.get("context") or entry.get("text") or text_to_find
             matches.append(
@@ -195,8 +207,15 @@ class MCPClient:
         if paragraph_index is not None:
             arguments["paragraph_index"] = paragraph_index
 
-        result = await self._call_tool("search_and_replace", arguments)
-        return self._message_is_successful(result.text)
+        # Сначала пробуем стандартную замену через MCP
+        result = await self._call_tool("replace_text", arguments)
+        
+        # Если стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц
+        if not self._message_is_successful(result.text):
+            logger.info(f"Стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц")
+            return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
+        
+        return True
 
     async def delete_paragraph(self, filename: str, paragraph_index: int) -> bool:
         result = await self._call_tool(
@@ -465,6 +484,104 @@ class MCPClient:
                     logger.warning(f"Не удалось установить стиль '{style}' и альтернативы для параграфа в документе {filename}")
 
         document.save(filename)
+
+    def _replace_text_locally_with_tables(
+        self,
+        filename: str,
+        old_text: str,
+        new_text: str,
+        paragraph_index: Optional[int] = None,
+    ) -> bool:
+        """
+        Локальная замена текста с поддержкой таблиц через python-docx
+        """
+        try:
+            from docx import Document
+            
+            doc = Document(filename)
+            replacements_made = 0
+            
+            # Замена в обычных параграфах
+            for paragraph in doc.paragraphs:
+                if old_text in paragraph.text:
+                    # Заменяем текст в параграфе
+                    for run in paragraph.runs:
+                        if old_text in run.text:
+                            run.text = run.text.replace(old_text, new_text)
+                            replacements_made += 1
+            
+            # Замена в таблицах
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if old_text in cell.text:
+                            # Заменяем текст в ячейке таблицы
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    if old_text in run.text:
+                                        run.text = run.text.replace(old_text, new_text)
+                                        replacements_made += 1
+            
+            if replacements_made > 0:
+                doc.save(filename)
+                logger.info(f"Локальная замена выполнена: {replacements_made} замен текста '{old_text}' на '{new_text}'")
+                return True
+            else:
+                logger.warning(f"Текст '{old_text}' не найден в документе для замены")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Ошибка при локальной замене текста: {e}")
+            return False
+
+    def _replace_text_locally_with_tables(
+        self,
+        filename: str,
+        old_text: str,
+        new_text: str,
+        paragraph_index: Optional[int] = None,
+    ) -> bool:
+        """
+        Локальная замена текста с поддержкой таблиц через python-docx
+        """
+        try:
+            from docx import Document
+            
+            doc = Document(filename)
+            replacements_made = 0
+            
+            # Замена в обычных параграфах
+            for paragraph in doc.paragraphs:
+                if old_text in paragraph.text:
+                    # Заменяем текст в параграфе
+                    for run in paragraph.runs:
+                        if old_text in run.text:
+                            run.text = run.text.replace(old_text, new_text)
+                            replacements_made += 1
+            
+            # Замена в таблицах
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if old_text in cell.text:
+                            # Заменяем текст в ячейке таблицы
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    if old_text in run.text:
+                                        run.text = run.text.replace(old_text, new_text)
+                                        replacements_made += 1
+            
+            if replacements_made > 0:
+                doc.save(filename)
+                logger.info(f"Локальная замена выполнена: {replacements_made} замен текста '{old_text}' на '{new_text}'")
+                return True
+            else:
+                logger.warning(f"Текст '{old_text}' не найден в документе для замены")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Ошибка при локальной замене текста: {e}")
+            return False
 
     @staticmethod
     def _insert_paragraph_xml(reference: Paragraph, text: str) -> Paragraph:
