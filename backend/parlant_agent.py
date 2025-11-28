@@ -1878,8 +1878,13 @@ class DocumentChangeAgent:
             Исправленный объект или None если не удалось исправить
         """
         try:
-            # Обязательные поля
-            required_fields = ["change_id", "operation", "target", "payload", "description"]
+            # Обязательные поля (payload не обязателен для DELETE_PARAGRAPH)
+            operation = change.get("operation", "")
+            is_delete_paragraph = operation == "DELETE_PARAGRAPH"
+            
+            required_fields = ["change_id", "operation", "target", "description"]
+            if not is_delete_paragraph:
+                required_fields.append("payload")
             
             for field in required_fields:
                 if field not in change:
@@ -1896,6 +1901,10 @@ class DocumentChangeAgent:
                         logger.error(f"❌ CHG-{index:03d}: критическое поле '{field}' отсутствует")
                         return None
             
+            # Для DELETE_PARAGRAPH создаем пустой payload, если его нет
+            if is_delete_paragraph and "payload" not in change:
+                change["payload"] = {}
+            
             # Проверяем target.text
             target = change.get("target", {})
             if not isinstance(target, dict):
@@ -1903,17 +1912,89 @@ class DocumentChangeAgent:
                 target = {}
                 change["target"] = target
             
-            if "text" not in target or not target["text"]:
-                logger.error(f"❌ CHG-{index:03d}: target.text отсутствует или пустой")
-                return None
+            # Если target.text отсутствует или пустой, пытаемся извлечь из описания
+            operation = change.get("operation", "")
+            if "text" not in target or not target.get("text"):
+                logger.warning(f"⚠️ CHG-{index:03d}: target.text отсутствует, пытаемся извлечь из описания")
+                original_description = change.get("description", "")
+                
+                # Для INSERT операций проверяем after_text или after_heading
+                is_insert_operation = operation in ["INSERT_PARAGRAPH", "INSERT_SECTION", "INSERT_TABLE"]
+                if is_insert_operation:
+                    # Для INSERT_PARAGRAPH проверяем target.after_text
+                    if operation == "INSERT_PARAGRAPH" and "after_text" in target and target.get("after_text"):
+                        target["text"] = target["after_text"]
+                        logger.info(f"🔧 CHG-{index:03d}: для INSERT_PARAGRAPH использован target.after_text: '{target['text']}'")
+                    # Для INSERT_SECTION проверяем target.after_heading
+                    elif operation == "INSERT_SECTION" and "after_heading" in target and target.get("after_heading"):
+                        target["text"] = target["after_heading"]
+                        logger.info(f"🔧 CHG-{index:03d}: для INSERT_SECTION использован target.after_heading: '{target['text']}'")
+                    else:
+                        # Пытаемся извлечь из описания для INSERT операций
+                        extracted_text = self._extract_target_for_insert(original_description)
+                        if extracted_text:
+                            target["text"] = extracted_text
+                            logger.info(f"🔧 CHG-{index:03d}: извлечен target.text для {operation} из описания: '{extracted_text}'")
+                        else:
+                            # Если не удалось, создаем пустой target.text (для INSERT это допустимо)
+                            target["text"] = ""
+                            logger.warning(f"⚠️ CHG-{index:03d}: для {operation} target.text будет пустым, используется позиция из payload/target")
+                else:
+                    # Для других операций пытаемся извлечь target.text из описания
+                    extracted_text = self._extract_target_from_description(original_description)
+                    if extracted_text:
+                        target["text"] = extracted_text
+                        logger.info(f"🔧 CHG-{index:03d}: извлечен target.text из описания: '{extracted_text}'")
+                    else:
+                        # Альтернативные методы
+                        alternative_text = self._extract_alternative_target(original_description, "")
+                        if alternative_text:
+                            target["text"] = alternative_text
+                            logger.info(f"🔧 CHG-{index:03d}: найден альтернативный target.text: '{alternative_text}'")
+                        else:
+                            # Для DELETE_PARAGRAPH и "Изложить пункт" разрешаем номер пункта как target.text
+                            description_lower = original_description.lower()
+                            is_delete_paragraph = operation == "DELETE_PARAGRAPH"
+                            is_full_paragraph_replacement = (
+                                operation == "REPLACE_TEXT" and
+                                "изложить" in description_lower and 
+                                "пункт" in description_lower and 
+                                ("редакции" in description_lower or "редакция" in description_lower)
+                            )
+                            
+                            # Извлекаем номер пункта для DELETE_PARAGRAPH или "Изложить пункт X"
+                            if is_delete_paragraph or is_full_paragraph_replacement:
+                                import re
+                                paragraph_num_match = re.search(r'пункт[е]?\s+(\d+)', description_lower)
+                                if paragraph_num_match:
+                                    paragraph_num = paragraph_num_match.group(1)
+                                    # Используем формат с точкой для совместимости
+                                    target["text"] = f"{paragraph_num}."
+                                    logger.info(f"🔧 CHG-{index:03d}: извлечен номер пункта для {operation}: '{target['text']}'")
+                                else:
+                                    logger.error(f"❌ CHG-{index:03d}: target.text отсутствует и не удалось извлечь из описания")
+                                    return None
+                            else:
+                                logger.error(f"❌ CHG-{index:03d}: target.text отсутствует или пустой")
+                                return None
             
             # СТРОГАЯ ВАЛИДАЦИЯ target.text
             target_text = target["text"]
             description = change.get("description", "").lower()
             original_description = change.get("description", "")
+            operation = change.get("operation", "")
             
-            # Проверяем что target.text не является номером пункта
-            if self._is_paragraph_number(target_text):
+            # Проверяем что target.text не является номером пункта (кроме DELETE_PARAGRAPH и "Изложить пункт")
+            is_delete_paragraph = operation == "DELETE_PARAGRAPH"
+            is_full_paragraph_replacement = (
+                operation == "REPLACE_TEXT" and
+                "изложить" in description and 
+                "пункт" in description and 
+                ("редакции" in description or "редакция" in description)
+            )
+            
+            # Для DELETE_PARAGRAPH и "Изложить пункт X в новой редакции" номер пункта допустим
+            if self._is_paragraph_number(target_text) and not (is_delete_paragraph or is_full_paragraph_replacement):
                 logger.warning(f"⚠️ CHG-{index:03d}: target.text '{target_text}' похож на номер пункта")
                 # Пытаемся извлечь правильный target.text из description
                 corrected_text = self._extract_target_from_description(original_description)
@@ -1982,6 +2063,10 @@ class DocumentChangeAgent:
                 change["payload"] = payload
             
             operation = change.get("operation", "")
+            
+            # Для INSERT операций payload проверяется отдельно
+            is_insert_operation = operation in ["INSERT_PARAGRAPH", "INSERT_SECTION", "INSERT_TABLE"]
+            
             if operation == "REPLACE_TEXT":
                 # Исправляем неправильное поле "text" на "new_text"
                 if "text" in payload and "new_text" not in payload:
@@ -1989,15 +2074,63 @@ class DocumentChangeAgent:
                     del payload["text"]
                     logger.info(f"🔧 CHG-{index:03d}: исправлено payload.text → payload.new_text")
                 
+                # Для инструкций "Изложить пункт X в новой редакции" payload.new_text может быть пустым,
+                # так как новое содержимое (включая таблицы) извлекается из документа инструкций
+                description_lower = change.get("description", "").lower()
+                is_full_paragraph_replacement = (
+                    "изложить" in description_lower and 
+                    "пункт" in description_lower and 
+                    ("редакции" in description_lower or "редакция" in description_lower)
+                )
+                
                 if "new_text" not in payload or not payload["new_text"]:
-                    logger.error(f"❌ CHG-{index:03d}: payload.new_text отсутствует или пустой")
+                    if is_full_paragraph_replacement:
+                        logger.info(f"✅ CHG-{index:03d}: для 'Изложить пункт в новой редакции' новый текст будет извлечен из инструкции")
+                        # Устанавливаем пустую строку, чтобы не было ошибок
+                        payload["new_text"] = ""
+                    else:
+                        logger.error(f"❌ CHG-{index:03d}: payload.new_text отсутствует или пустой")
+                        return None
+            
+            # Для INSERT_PARAGRAPH проверяем payload.text или payload.new_text
+            elif operation == "INSERT_PARAGRAPH":
+                if "text" not in payload and "new_text" not in payload:
+                    logger.error(f"❌ CHG-{index:03d}: для INSERT_PARAGRAPH необходим payload.text или payload.new_text")
+                    return None
+                # Нормализуем: используем payload.text, если есть, иначе payload.new_text
+                if "text" in payload and payload.get("text"):
+                    if "new_text" not in payload:
+                        payload["new_text"] = payload["text"]
+                elif "new_text" not in payload or not payload.get("new_text"):
+                    logger.error(f"❌ CHG-{index:03d}: для INSERT_PARAGRAPH payload.text или payload.new_text должны быть заполнены")
                     return None
             
             # Проверяем валидность операции
-            valid_operations = ["REPLACE_TEXT", "DELETE_PARAGRAPH", "INSERT_PARAGRAPH", "ADD_COMMENT"]
+            valid_operations = ["REPLACE_TEXT", "DELETE_PARAGRAPH", "INSERT_PARAGRAPH", "INSERT_SECTION", "INSERT_TABLE", "ADD_COMMENT"]
             if operation not in valid_operations:
                 logger.warning(f"⚠️ CHG-{index:03d}: неизвестная операция '{operation}', заменяем на REPLACE_TEXT")
                 change["operation"] = "REPLACE_TEXT"
+            
+            # Для INSERT_SECTION проверяем наличие необходимых полей
+            if operation == "INSERT_SECTION":
+                if "payload" not in change or not isinstance(change["payload"], dict):
+                    change["payload"] = {}
+                payload = change["payload"]
+                # Если нет payload.new_text, но есть payload.heading_text и payload.paragraphs
+                if "new_text" not in payload or not payload.get("new_text"):
+                    if "heading_text" in payload and payload.get("heading_text"):
+                        # Создаем new_text из heading_text и paragraphs
+                        heading = payload["heading_text"]
+                        paragraphs = payload.get("paragraphs", [])
+                        if isinstance(paragraphs, list):
+                            new_text = heading + "\n" + "\n".join(paragraphs)
+                        else:
+                            new_text = heading + "\n" + str(paragraphs)
+                        payload["new_text"] = new_text
+                        logger.info(f"🔧 CHG-{index:03d}: создан payload.new_text для INSERT_SECTION из heading_text и paragraphs")
+                    else:
+                        logger.warning(f"⚠️ CHG-{index:03d}: для INSERT_SECTION отсутствуют payload.heading_text или payload.paragraphs")
+                        payload["new_text"] = ""
             
             logger.info(f"✅ CHG-{index:03d}: валидирован ({operation})")
             return change
@@ -2048,6 +2181,27 @@ class DocumentChangeAgent:
         import re
         
         logger.info(f"🔍 ИЗВЛЕЧЕНИЕ TARGET из описания: '{description}'")
+        
+        # Сначала проверяем специальные случаи: "Удалить пункт X", "Изложить пункт X"
+        description_lower = description.lower()
+        
+        # Для "Удалить пункт X" - возвращаем номер пункта с точкой
+        if "удалить" in description_lower and "пункт" in description_lower:
+            paragraph_num_match = re.search(r'пункт[е]?\s+(\d+)', description_lower)
+            if paragraph_num_match:
+                paragraph_num = paragraph_num_match.group(1)
+                result = f"{paragraph_num}."
+                logger.info(f"🎯 Извлечен номер пункта для удаления: '{result}'")
+                return result
+        
+        # Для "Изложить пункт X в новой редакции" - возвращаем номер пункта с точкой
+        if "изложить" in description_lower and "пункт" in description_lower and "редакции" in description_lower:
+            paragraph_num_match = re.search(r'пункт[е]?\s+(\d+)', description_lower)
+            if paragraph_num_match:
+                paragraph_num = paragraph_num_match.group(1)
+                result = f"{paragraph_num}."
+                logger.info(f"🎯 Извлечен номер пункта для замены: '{result}'")
+                return result
         
         # Расширенные паттерны для извлечения текста
         patterns = [
@@ -2109,6 +2263,53 @@ class DocumentChangeAgent:
                             return extracted_text
         
         logger.warning(f"⚠️ Не удалось извлечь target.text из описания: '{description}'")
+        return None
+    
+    def _extract_target_for_insert(self, description: str) -> Optional[str]:
+        """
+        Извлекает target.text для INSERT операций из описания.
+        
+        Args:
+            description: Описание инструкции
+            
+        Returns:
+            Извлеченный target.text или None
+        """
+        import re
+        
+        logger.info(f"🔍 ИЗВЛЕЧЕНИЕ TARGET для INSERT из описания: '{description}'")
+        description_lower = description.lower()
+        
+        # Для "Добавь новый раздел X после раздела Y" - извлекаем Y
+        if "после раздела" in description_lower or "после" in description_lower:
+            patterns = [
+                r'после раздела\s+([^«"]+)',
+                r'после\s+([^«"]+)',
+                r'после\s+раздела\s*[«"]([^»"]+)[»"]',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, description, re.IGNORECASE)
+                if match:
+                    extracted = match.group(1).strip()
+                    if extracted:
+                        logger.info(f"🎯 Извлечен target.text для INSERT: '{extracted}'")
+                        return extracted
+        
+        # Для "Добавь новый endpoint после X" - извлекаем X
+        if "после" in description_lower:
+            patterns = [
+                r'после\s+([^«"]+?)(?:\s+со следующим|\s+с текстом|$)',
+                r'после\s*[«"]([^»"]+)[»"]',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, description, re.IGNORECASE)
+                if match:
+                    extracted = match.group(1).strip()
+                    if extracted:
+                        logger.info(f"🎯 Извлечен target.text для INSERT: '{extracted}'")
+                        return extracted
+        
+        # Если не нашли, возвращаем None (для INSERT это допустимо)
         return None
 
     def _extract_alternative_target(self, description: str, current_target: str) -> Optional[str]:
@@ -3076,6 +3277,7 @@ class DocumentChangeAgent:
                         source_file,
                         change,
                         progress_callback=progress_callback,
+                        changes_file=changes_file,
                     )
                     results.append(execution_result)
                     
@@ -3185,6 +3387,7 @@ class DocumentChangeAgent:
         filename: str,
         change: Dict[str, Any],
         progress_callback: OperationCallback = None,
+        changes_file: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Выполнение одного изменения в документе.
@@ -3225,7 +3428,7 @@ class DocumentChangeAgent:
             logger.debug(f"{change_id}: выполнение операции {operation}")
             
             if operation == "REPLACE_TEXT":
-                details = await self._handle_replace_text(filename, change)
+                details = await self._handle_replace_text(filename, change, changes_file=changes_file)
             elif operation == "REPLACE_POINT_TEXT":
                 details = await self._handle_replace_point_text(filename, change)
             elif operation == "DELETE_PARAGRAPH":
@@ -3269,29 +3472,66 @@ class DocumentChangeAgent:
 
         return result
 
-    async def _handle_replace_text(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_replace_text(self, filename: str, change: Dict[str, Any], changes_file: Optional[str] = None) -> Dict[str, Any]:
         """
         Обработка замены текста с поддержкой массовых замен и интеллектуальным анализом таблиц.
         """
         target = change.get("target", {})
         payload = change.get("payload", {})
         target_text = target.get("text")
-        new_text = payload.get("new_text")
+        new_text = payload.get("new_text", "")
         match_case = target.get("match_case", False)
         replace_all = target.get("replace_all", False)  # Флаг для массовых замен
+        description = change.get("description", "")
 
-        if not target_text or not new_text:
+        # Для инструкций "Изложить пункт X в новой редакции" new_text может быть пустым,
+        # так как новое содержимое (включая таблицы) извлекается из документа инструкций
+        is_full_paragraph_replacement = (
+            "изложить" in description.lower() and 
+            "пункт" in description.lower() and 
+            ("редакции" in description.lower() or "редакция" in description.lower())
+        )
+        
+        if not target_text:
             return {
                 "success": False,
                 "error": "INVALID_PAYLOAD",
-                "message": "Для REPLACE_TEXT необходимы target.text и payload.new_text",
+                "message": "Для REPLACE_TEXT необходим target.text",
             }
+        
+        # Разрешаем пустой new_text только для полной замены пункта
+        if not new_text and not is_full_paragraph_replacement:
+            return {
+                "success": False,
+                "error": "INVALID_PAYLOAD",
+                "message": "Для REPLACE_TEXT необходим payload.new_text (кроме случаев 'Изложить пункт в новой редакции')",
+            }
+        
+        # Для полной замены пункта логируем особый случай
+        if is_full_paragraph_replacement and not new_text:
+            logger.info(f"🔍 ИНСТРУКЦИЯ 'Изложить пункт в новой редакции': новый текст будет извлечен из документа инструкций")
 
         # ИНТЕЛЛЕКТУАЛЬНАЯ ЛОГИКА ДЛЯ ТАБЛИЦ: Прямой вызов для всех изменений в таблицах
-        description = change.get("description", "").lower()
-        is_table_change = "таблице" in description
+        description_lower = description.lower()
+        is_table_change = "таблице" in description_lower
         
         logger.info(f"🔍 ПРОВЕРКА ТАБЛИЦЫ: is_table_change={is_table_change}, description='{description[:50]}...'")
+        
+        # Для инструкций "Изложить пункт X в новой редакции" используем специальную обработку
+        if is_full_paragraph_replacement:
+            logger.info(f"🔍 ИНСТРУКЦИЯ 'Изложить пункт {target_text} в новой редакции': ищем текст пункта в документе")
+            logger.info(f"    Используем интеллектуальную замену для пункта {target_text}")
+            # Используем интеллектуальную замену для обработки полной замены пункта
+            # с поддержкой извлечения таблиц из инструкций
+            matches = await self._safe_find_text(filename, target_text, match_case)
+            if matches:
+                result = await self._intelligent_paragraph_replacement(
+                    filename, target_text, new_text, description, matches, changes_file=changes_file
+                )
+                if result.get("success"):
+                    return result
+                else:
+                    logger.warning(f"⚠️ Интеллектуальная замена не удалась, продолжаем со стандартной логикой: {result.get('message', 'Неизвестная ошибка')}")
         
         if is_table_change:
             logger.info("🧠 ОБНАРУЖЕНО ИЗМЕНЕНИЕ В ТАБЛИЦЕ - запуск интеллектуальной замены")
@@ -3397,7 +3637,7 @@ class DocumentChangeAgent:
             logger.info("📋 ОБНАРУЖЕНО ИЗМЕНЕНИЕ В ПУНКТЕ - используем интеллектуальный поиск")
             
             # Ищем правильный параграф и заменяем только нужную часть
-            result = await self._intelligent_paragraph_replacement(filename, target_text, new_text, description, matches)
+            result = await self._intelligent_paragraph_replacement(filename, target_text, new_text, description, matches, changes_file=changes_file)
             if result["success"]:
                 return result
             else:
@@ -3481,11 +3721,22 @@ class DocumentChangeAgent:
             table_name = None
             if "таблице" in description.lower():
                 import re
-                # Ищем паттерн "в таблице «название»"
-                match = re.search(r'таблице\s*[«"](.*?)[»"]', description, re.IGNORECASE)
-                if match:
-                    table_name = match.group(1).strip()
-                    logger.info(f"📋 Ограничение поиска таблицей: '{table_name}'")
+                # Ищем паттерн "в таблице «название»" или "таблице 'название'"
+                patterns = [
+                    r'таблице\s*[«"](.*?)[»"]',  # таблице «название»
+                    r'таблице\s*[\']([^\']+)[\']',  # таблице 'название'
+                    r'таблиц[еи]\s+[«"](.*?)[»"]',  # таблице/таблицы «название»
+                    r'таблиц[еи]\s+[\']([^\']+)[\']',  # таблице/таблицы 'название'
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, description, re.IGNORECASE)
+                    if match:
+                        table_name = match.group(1).strip()
+                        logger.info(f"📋 Извлечено название таблицы из описания: '{table_name}' (паттерн: {pattern})")
+                        break
+                
+                if not table_name:
+                    logger.warning(f"⚠️ Не удалось извлечь название таблицы из описания: '{description[:100]}...'")
             
             # ИНТЕЛЛЕКТУАЛЬНОЕ ОПРЕДЕЛЕНИЕ ЦЕЛЕВОЙ ТАБЛИЦЫ ЧЕРЕЗ LLM
             llm_target_table_indices = None
@@ -3620,8 +3871,9 @@ class DocumentChangeAgent:
                     
                     if not table_contains_target:
                         logger.warning(f"   ⚠️ Таблица {table_idx} определена LLM как целевая, но не содержит target_text '{target_text}'")
-                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx}")
-                        continue
+                        logger.info(f"   🔍 Продолжаем поиск в таблице {table_idx} (возможно, target_text в другой форме или требуется более глубокий поиск)")
+                        # НЕ пропускаем таблицу, если LLM определила её как целевую - продолжаем поиск
+                        # Это позволяет найти target_text даже если он в другой форме
                     else:
                         logger.info(f"   ✅ Таблица {table_idx} определена LLM как целевая и содержит target_text")
                 
@@ -3776,44 +4028,56 @@ class DocumentChangeAgent:
             logger.warning(f"Ошибка получения текста перед таблицей {table_idx}: {e}")
             return ""
     
-    def _find_paragraph_for_table(self, doc: Document, table_idx: int) -> int:
+    def _find_paragraph_for_table(self, doc: Document, table_idx: int, after_table: bool = True) -> int:
         """
         Находит индекс параграфа, соответствующего указанной таблице.
         
         Args:
             doc: Документ
             table_idx: Индекс таблицы в документе
+            after_table: Если True, ищет параграф ПОСЛЕ таблицы (для аннотаций),
+                        если False, ищет параграф ПЕРЕД таблицей
             
         Returns:
-            Индекс параграфа, который находится перед таблицей или связан с ней,
+            Индекс параграфа после таблицы (или перед, если after_table=False),
             или -1 если не найден
         """
         try:
             table_count = 0
-            para_count = 0
             
             # Проходим по элементам документа
             for i, element in enumerate(doc.element.body):
-                if element.tag.endswith('p'):  # Параграф
-                    para_count += 1
-                elif element.tag.endswith('tbl'):  # Таблица
+                if element.tag.endswith('tbl'):  # Таблица
                     if table_count == table_idx:
-                        # Нашли нужную таблицу, ищем параграф перед ней
-                        # Ищем параграф перед этим элементом
-                        for j in range(i - 1, -1, -1):
-                            if doc.element.body[j].tag.endswith('p'):
-                                # Подсчитываем индекс параграфа (сколько параграфов до этого элемента)
-                                para_idx = sum(1 for k in range(j + 1) if doc.element.body[k].tag.endswith('p')) - 1
-                                logger.info(f"   📍 Найден параграф {para_idx} перед таблицей {table_idx}")
-                                return para_idx
-                        # Если не нашли параграф перед таблицей, возвращаем текущий счетчик
-                        logger.warning(f"   ⚠️ Параграф перед таблицей {table_idx} не найден, используем {para_count - 1}")
-                        return max(0, para_count - 1)
+                        # Нашли нужную таблицу
+                        if after_table:
+                            # Ищем параграф ПОСЛЕ таблицы
+                            for j in range(i + 1, len(doc.element.body)):
+                                if doc.element.body[j].tag.endswith('p'):
+                                    # Подсчитываем индекс параграфа (сколько параграфов до этого элемента включительно)
+                                    para_idx = sum(1 for k in range(j + 1) if doc.element.body[k].tag.endswith('p')) - 1
+                                    logger.info(f"   📍 Найден параграф {para_idx} ПОСЛЕ таблицы {table_idx}")
+                                    return para_idx
+                            # Если не нашли параграф после таблицы, возвращаем последний параграф в документе
+                            last_para_idx = sum(1 for k in range(len(doc.element.body)) if doc.element.body[k].tag.endswith('p')) - 1
+                            if last_para_idx >= 0:
+                                logger.info(f"   📍 Параграф после таблицы {table_idx} не найден, используем последний параграф {last_para_idx}")
+                                return last_para_idx
+                        else:
+                            # Ищем параграф ПЕРЕД таблицей (старая логика для обратной совместимости)
+                            para_count = sum(1 for k in range(i) if doc.element.body[k].tag.endswith('p'))
+                            for j in range(i - 1, -1, -1):
+                                if doc.element.body[j].tag.endswith('p'):
+                                    para_idx = sum(1 for k in range(j + 1) if doc.element.body[k].tag.endswith('p')) - 1
+                                    logger.info(f"   📍 Найден параграф {para_idx} перед таблицей {table_idx}")
+                                    return para_idx
+                            logger.warning(f"   ⚠️ Параграф перед таблицей {table_idx} не найден, используем {para_count - 1}")
+                            return max(0, para_count - 1)
                     table_count += 1
             
-            # Если не нашли таблицу, возвращаем последний известный индекс
-            logger.warning(f"   ⚠️ Таблица {table_idx} не найдена, используем {para_count - 1}")
-            return max(0, para_count - 1)
+            # Если не нашли таблицу, возвращаем -1
+            logger.warning(f"   ⚠️ Таблица {table_idx} не найдена")
+            return -1
         except Exception as e:
             logger.error(f"Ошибка поиска параграфа для таблицы {table_idx}: {e}")
             return -1
@@ -4311,23 +4575,42 @@ class DocumentChangeAgent:
 {tables_summary}
 
 ПРОАНАЛИЗИРУЙ инструкцию и определи, какая таблица (или таблицы) является целевой для этого изменения.
+
+КРИТЕРИИ ВЫБОРА (в порядке приоритета):
+1. НАЗВАНИЕ ТАБЛИЦЫ: Если указано название (полностью или частично), ищи его:
+   - В тексте ПЕРЕД таблицей (в параграфах перед таблицей) - ВЫСОКИЙ ПРИОРИТЕТ
+   - В заголовках самой таблицы
+   - Название может быть сокращено или обрезано, ищи частичные совпадения
+   
+2. НАЛИЧИЕ ИСКОМОГО ТЕКСТА: Таблица должна содержать искомый текст "{target_text}"
+
+3. СЕМАНТИКА ИНСТРУКЦИИ: Структура и тип таблицы должны соответствовать описанию инструкции
+
+4. ТИП ТАБЛИЦЫ: Для инструкций типа "Изменение строки" в таблице сокращений - выбирай таблицы с аббревиатурами
+
 ВАЖНО: 
-- Название таблицы может быть указано в тексте ПЕРЕД таблицей (в параграфах перед таблицей)
-- Ищи название таблицы не только в заголовках самой таблицы, но и в тексте перед ней
-- Учитывай семантику инструкции, название таблицы (в тексте перед таблицей или в заголовках) и наличие искомого текста
+- Если название таблицы указано (даже частично), приоритет отдавай таблицам, где это название найдено в тексте перед таблицей
+- Если название не указано, но есть искомый текст - выбирай таблицу, где этот текст найден
+- Если несколько критериев указывают на одну таблицу - confidence должен быть высоким (>= 0.8)
+- Если есть неопределенность, но один вариант более вероятен - установи confidence >= 0.6 и верни этот вариант
 
 Верни JSON:
 {{
   "target_table_indices": [0, 1, ...],
   "confidence": 0.95,
-  "reasoning": "объяснение выбора"
+  "reasoning": "детальное объяснение выбора с указанием всех критериев"
 }}
 
 Если изменение точечное и касается конкретной таблицы, верни только её индекс.
 Если изменение должно применяться к нескольким таблицам, верни все соответствующие индексы.
-Если не удалось точно определить, верни пустой массив."""
+Если название таблицы указано и найдено в тексте перед таблицей - устанавливай confidence >= 0.8."""
 
             logger.info(f"   🤖 Отправка запроса к LLM для определения целевой таблицы...")
+            logger.info(f"   📝 Параметры запроса:")
+            logger.info(f"      - Описание: '{description[:200]}...'")
+            logger.info(f"      - Искомый текст: '{target_text}'")
+            logger.info(f"      - Название таблицы: '{table_name if table_name else 'Не указано'}'")
+            logger.info(f"      - Количество таблиц в документе: {len(doc.tables)}")
             
             response = await self.openai_client.chat.completions.create(
                 model=self.model_name,
@@ -4375,11 +4658,18 @@ class DocumentChangeAgent:
                 logger.warning("target_table_indices должен быть списком")
                 return None
             
+            confidence = result.get("confidence", 0)
+            reasoning = result.get("reasoning", "")
+            
+            logger.info(f"   📊 Результат LLM: target_table_indices={target_indices}, confidence={confidence:.2f}")
+            
             # Фильтруем индексы (проверяем, что они валидны)
             valid_indices = [idx for idx in target_indices if isinstance(idx, int) and 0 <= idx < len(doc.tables)]
             
-            confidence = result.get("confidence", 0)
-            reasoning = result.get("reasoning", "")
+            # Логируем результаты валидации
+            if len(target_indices) != len(valid_indices):
+                invalid_indices = [idx for idx in target_indices if idx not in valid_indices]
+                logger.warning(f"   ⚠️ Некоторые индексы не прошли валидацию: {invalid_indices} (всего таблиц в документе: {len(doc.tables)})")
             
             if valid_indices:
                 logger.info(f"   ✅ LLM определил целевые таблицы: {valid_indices} (confidence: {confidence:.2f})")
@@ -4387,7 +4677,13 @@ class DocumentChangeAgent:
                     logger.info(f"   💭 LLM reasoning: {reasoning[:200]}...")
                 return valid_indices
             else:
-                logger.info(f"   ⚠️ LLM не смог точно определить целевую таблицу (confidence: {confidence:.2f})")
+                logger.warning(f"   ⚠️ LLM не смог точно определить целевую таблицу:")
+                logger.warning(f"      - target_table_indices от LLM: {target_indices}")
+                logger.warning(f"      - confidence: {confidence:.2f}")
+                logger.warning(f"      - valid_indices после фильтрации: {valid_indices}")
+                logger.warning(f"      - всего таблиц в документе: {len(doc.tables)}")
+                if reasoning:
+                    logger.warning(f"      - reasoning: {reasoning[:200]}...")
                 return None
             
         except json.JSONDecodeError as e:
@@ -4783,63 +5079,80 @@ class DocumentChangeAgent:
             # Ищем все упоминания номера пункта
             punkt_locations = []
             
-            # Ищем в параграфах
-            for para_idx, para in enumerate(doc.paragraphs[:50]):  # Ограничиваем первыми 50 параграфами
+            # Ищем в параграфах с более точным поиском
+            import re
+            for para_idx, para in enumerate(doc.paragraphs):  # Ищем во всех параграфах
                 para_text = para.text.strip()
-                # Проверяем различные форматы номера пункта
+                # Используем точные regex паттерны для начала строки
                 punkt_patterns = [
-                    f"{punkt_number}.",
-                    f"{punkt_number})",
-                    f"{punkt_number}:",
-                    f"пункт {punkt_number}",
-                    f"п.{punkt_number}",
+                    rf"^{re.escape(punkt_number)}\.",
+                    rf"^{re.escape(punkt_number)}\)",
+                    rf"^{re.escape(punkt_number)}:",
+                    rf"^{re.escape(punkt_number)}\s",
+                    rf"\bпункт\s+{re.escape(punkt_number)}\b",
+                    rf"\bп\.\s*{re.escape(punkt_number)}\b",
                 ]
+                punkt_found = False
                 for pattern in punkt_patterns:
-                    if pattern in para_text:
+                    if re.search(pattern, para_text, re.IGNORECASE):
                         punkt_locations.append({
                             "type": "paragraph",
                             "index": para_idx,
                             "text": para_text[:200],
                             "contains_target": target_text in para_text
                         })
+                        punkt_found = True
                         break
+                # Если нашли достаточно совпадений, останавливаемся
+                if len(punkt_locations) >= 10:
+                    break
             
-            # Ищем в таблицах
+            # Ищем в таблицах с более точным поиском
             table_info_list = []
             for table_idx, table in enumerate(doc.tables):
+                # Получаем текст перед таблицей (для контекста)
+                text_before_table = self._get_text_before_table(doc, table_idx, max_paragraphs=3)
+                
                 table_rows_info = []
-                for row_idx, row in enumerate(table.rows[:20]):  # Ограничиваем первыми 20 строками
+                for row_idx, row in enumerate(table.rows):  # Ищем во всех строках
                     row_text = ""
                     contains_punkt = False
                     contains_target = False
+                    punkt_cell_idx = None
+                    target_cell_idx = None
                     
                     for cell_idx, cell in enumerate(row.cells):
                         cell_text = cell.text.strip()
                         row_text += f" | {cell_text}"
                         
-                        # Проверяем наличие номера пункта
+                        # Используем точные regex паттерны для начала строки/ячейки
                         punkt_patterns = [
-                            f"{punkt_number}.",
-                            f"{punkt_number})",
-                            f"{punkt_number}:",
-                            f"пункт {punkt_number}",
-                            f"п.{punkt_number}",
+                            rf"^{re.escape(punkt_number)}\.",
+                            rf"^{re.escape(punkt_number)}\)",
+                            rf"^{re.escape(punkt_number)}:",
+                            rf"^{re.escape(punkt_number)}\s",
+                            rf"\bпункт\s+{re.escape(punkt_number)}\b",
+                            rf"\bп\.\s*{re.escape(punkt_number)}\b",
                         ]
                         for pattern in punkt_patterns:
-                            if pattern in cell_text:
+                            if re.search(pattern, cell_text, re.IGNORECASE):
                                 contains_punkt = True
+                                punkt_cell_idx = cell_idx
                                 break
                         
                         # Проверяем наличие target_text
                         if target_text in cell_text:
                             contains_target = True
+                            target_cell_idx = cell_idx
                     
                     if contains_punkt or contains_target:
                         table_rows_info.append({
                             "row_index": row_idx,
                             "text": row_text[:300],
                             "contains_punkt": contains_punkt,
-                            "contains_target": contains_target
+                            "contains_target": contains_target,
+                            "punkt_cell": punkt_cell_idx,
+                            "target_cell": target_cell_idx
                         })
                 
                 if table_rows_info:
@@ -4854,15 +5167,23 @@ class DocumentChangeAgent:
                     table_info_list.append({
                         "table_index": table_idx,
                         "headers": headers,
-                        "rows": table_rows_info[:5]  # Первые 5 релевантных строк
+                        "text_before": text_before_table[:200] if text_before_table else "",
+                        "rows": table_rows_info[:10]  # Первые 10 релевантных строк
                     })
             
             # Формируем промпт для LLM
             system_prompt = """Ты эксперт по анализу структуры документов Word. 
 Твоя задача - найти указанный пункт в документе и определить:
 1. Находится ли пункт в таблице или в обычном параграфе
-2. Если в таблице - в какой строке таблицы находится текст для замены
-3. В какой ячейке находится target_text для замены
+2. Если в таблице - в какой таблице (индекс), в какой строке (индекс строки) и в какой ячейке (индекс столбца) находится номер пункта
+3. В какой ячейке (индекс столбца) находится target_text для замены (ВАЖНО: target_text НЕ должен быть в той же ячейке, где номер пункта)
+4. Если в параграфе - в каком параграфе (индекс)
+
+ВАЖНО:
+- Номер пункта может быть в первой ячейке строки таблицы
+- target_text для замены должен находиться в других ячейках той же строки
+- Если пункт найден в таблице, но target_text не найден в той же строке, проверь соседние строки
+- Учитывай текст перед таблицей - он может содержать название таблицы или контекст
 
 Верни JSON с точной информацией о местоположении пункта и текста для замены."""
 
@@ -4873,9 +5194,10 @@ class DocumentChangeAgent:
             
             tables_info = "\n".join([
                 f"Таблица {t['table_index']}:\n"
-                f"  Заголовки: {'; '.join(t['headers'])}\n"
+                + (f"  Текст перед таблицей: {t.get('text_before', '')}\n" if t.get('text_before') else "")
+                + f"  Заголовки: {'; '.join(t['headers'])}\n"
                 + "\n".join([
-                    f"  Строка {r['row_index']}: {r['text']} (пункт: {r['contains_punkt']}, target: {r['contains_target']})"
+                    f"  Строка {r['row_index']}: {r['text']} (пункт в ячейке {r.get('punkt_cell', 'N/A')}: {r['contains_punkt']}, target в ячейке {r.get('target_cell', 'N/A')}: {r['contains_target']})"
                     for r in t['rows']
                 ])
                 for t in table_info_list
@@ -4894,22 +5216,32 @@ class DocumentChangeAgent:
 
 ПРОАНАЛИЗИРУЙ и определи:
 1. Находится ли пункт {punkt_number} в таблице или в обычном параграфе?
-2. Если в таблице - в какой таблице (индекс) и в какой строке (индекс строки)?
-3. В какой ячейке (индекс столбца) находится target_text "{target_text}"?
-4. Если в параграфе - в каком параграфе (индекс)?
+2. Если в таблице:
+   - В какой таблице (индекс)?
+   - В какой строке (индекс строки) находится номер пункта {punkt_number}?
+   - В какой ячейке (индекс столбца) находится номер пункта?
+   - В какой ячейке (индекс столбца) находится target_text "{target_text}" для замены?
+   - ВАЖНО: target_text должен быть в другой ячейке, не в той, где номер пункта
+3. Если в параграфе - в каком параграфе (индекс)?
+
+КРИТЕРИИ ВЫБОРА:
+- Если пункт найден в таблице и target_text найден в той же строке - confidence >= 0.8
+- Если пункт найден в таблице, но target_text не найден в той же строке - проверь соседние строки, confidence >= 0.6
+- Если пункт найден в параграфе и target_text найден в том же параграфе - confidence >= 0.8
+- Если пункт не найден, но есть похожие совпадения - confidence < 0.7, location_type: "unknown"
 
 Верни JSON:
 {{
-  "location_type": "table" или "paragraph",
+  "location_type": "table" или "paragraph" или "unknown",
   "table_index": 0 (если location_type == "table"),
   "row_index": 5 (если location_type == "table"),
-  "cell_index": 1 (если location_type == "table" и указан),
+  "cell_index": 1 (индекс ячейки с target_text, если location_type == "table"),
   "paragraph_index": 10 (если location_type == "paragraph"),
   "confidence": 0.95,
-  "reasoning": "объяснение определения местоположения"
+  "reasoning": "детальное объяснение определения местоположения с указанием всех найденных совпадений"
 }}
 
-Если не удалось точно определить, верни location_type: "unknown"."""
+Если пункт не найден или не удалось точно определить, верни location_type: "unknown" с confidence < 0.7."""
 
             logger.info(f"   🤖 Отправка запроса к LLM для поиска пункта {punkt_number}...")
             
@@ -4983,7 +5315,359 @@ class DocumentChangeAgent:
             logger.error(f"Ошибка при запросе к LLM для поиска пункта: {e}")
             return None
     
-    async def _intelligent_paragraph_replacement(self, filename: str, target_text: str, new_text: str, description: str, matches: List) -> Dict[str, Any]:
+    def _extract_tables_from_instructions(self, changes_file: str) -> Dict[str, List]:
+        """
+        Извлекает таблицы из документа инструкций и связывает их с предшествующим текстом.
+        
+        Returns:
+            Словарь, где ключ - текст перед таблицей (например, номер пункта), значение - список таблиц
+        """
+        if not changes_file or not os.path.exists(changes_file):
+            return {}
+        
+        try:
+            doc = Document(changes_file)
+            tables_info = {}
+            
+            # Проходим по всем элементам документа
+            prev_text = ""
+            for element in doc.element.body:
+                if element.tag.endswith('p'):  # Параграф
+                    para_idx = doc.element.body.index(element)
+                    if para_idx < len(doc.paragraphs):
+                        para_text = doc.paragraphs[para_idx].text.strip()
+                        if para_text:
+                            # Сохраняем текст как контекст для следующей таблицы
+                            prev_text = para_text
+                
+                elif element.tag.endswith('tbl'):  # Таблица
+                    table_idx = sum(1 for i, e in enumerate(doc.element.body) 
+                                   if e.tag.endswith('tbl') and i <= doc.element.body.index(element))
+                    if table_idx < len(doc.tables):
+                        table = doc.tables[table_idx]
+                        
+                        # Извлекаем данные таблицы
+                        table_data = []
+                        for row in table.rows:
+                            row_data = [cell.text.strip() for cell in row.cells]
+                            table_data.append(row_data)
+                        
+                        # Связываем таблицу с предшествующим текстом
+                        key = prev_text[:100]  # Берем первые 100 символов как ключ
+                        if key not in tables_info:
+                            tables_info[key] = []
+                        tables_info[key].append(table_data)
+                        logger.info(f"📊 Извлечена таблица {table_idx} из инструкций (контекст: '{key[:50]}...')")
+            
+            return tables_info
+        except Exception as e:
+            logger.error(f"Ошибка при извлечении таблиц из инструкций: {e}")
+            return {}
+    
+    def _extract_content_for_paragraph_replacement(
+        self,
+        changes_file: str,
+        paragraph_num: str
+    ) -> Dict[str, Any]:
+        """
+        Извлекает содержимое (таблицу или текст) для замены пункта из документа инструкций.
+        Ищет текст после фразы "пункт X изложить в новой/следующей редакции".
+        
+        Returns:
+            Словарь с ключами:
+            - 'table_data': данные таблицы (если есть) или None
+            - 'text_content': текстовое содержимое (если есть) или None
+        """
+        if not changes_file or not os.path.exists(changes_file):
+            return {"table_data": None, "text_content": None}
+        
+        try:
+            import re
+            doc = Document(changes_file)
+            result = {"table_data": None, "text_content": None}
+            
+            # Паттерн для поиска инструкции "пункт X изложить в новой/следующей редакции"
+            # Учитываем возможные варианты: "редакции:", "редакции и далее", "редакции." и т.д.
+            pattern = re.compile(
+                rf'пункт[е]?\s+{re.escape(paragraph_num)}\s+изложить\s+в\s+(новой|следующей)\s+редакции[:\.,]?\s*(?:и\s+далее)?',
+                re.IGNORECASE
+            )
+            
+            # Ищем инструкцию в документе
+            instruction_para_idx = None
+            for idx, para in enumerate(doc.paragraphs):
+                para_text = para.text.strip()
+                if pattern.search(para_text):
+                    instruction_para_idx = idx
+                    logger.info(f"✅ Найдена инструкция для пункта {paragraph_num} в параграфе {idx}: '{para_text[:100]}...'")
+                    break
+            
+            if instruction_para_idx is None:
+                logger.warning(f"⚠️ Инструкция для пункта {paragraph_num} не найдена в документе инструкций")
+                # Попробуем альтернативный поиск без строгого паттерна
+                logger.info(f"🔍 Попытка альтернативного поиска инструкции для пункта {paragraph_num}...")
+                for idx, para in enumerate(doc.paragraphs):
+                    para_text = para.text.strip().lower()
+                    if f"пункт {paragraph_num}" in para_text and "изложить" in para_text and "редакции" in para_text:
+                        instruction_para_idx = idx
+                        logger.info(f"✅ Найдена инструкция для пункта {paragraph_num} (альтернативный поиск) в параграфе {idx}")
+                        break
+                
+                if instruction_para_idx is None:
+                    logger.error(f"❌ Инструкция для пункта {paragraph_num} не найдена даже альтернативным поиском")
+                    return result
+            
+            # Ищем содержимое после инструкции
+            # Проходим по параграфам после инструкции
+            text_parts = []
+            
+            for idx in range(instruction_para_idx + 1, len(doc.paragraphs)):
+                para = doc.paragraphs[idx]
+                para_text = para.text.strip()
+                
+                # Проверяем, не началась ли новая инструкция
+                # Новая инструкция начинается с номера или содержит ключевые слова изменений
+                if re.match(r'^\d+[\.\):]', para_text) or \
+                   ("изложить" in para_text.lower() and "редакции" in para_text.lower()) or \
+                   ("заменить" in para_text.lower() and idx != instruction_para_idx + 1) or \
+                   ("удалить" in para_text.lower() and idx != instruction_para_idx + 1):
+                    # Началась новая инструкция, останавливаемся
+                    break
+                
+                # Добавляем текст (если не пустой)
+                if para_text:
+                    text_parts.append(para_text)
+            
+            # Проверяем, есть ли таблицы между параграфами
+            # Ищем таблицы, которые находятся после инструкции
+            # Для этого используем XML структуру документа
+            instruction_para_element = doc.paragraphs[instruction_para_idx]._p
+            parent = instruction_para_element.getparent()
+            
+            if parent is not None:
+                # Находим позицию параграфа инструкции
+                instruction_pos = None
+                for i, elem in enumerate(parent):
+                    if elem == instruction_para_element:
+                        instruction_pos = i
+                        break
+                
+                logger.info(f"🔍 Поиск таблиц после инструкции (позиция параграфа: {instruction_pos}, всего элементов: {len(parent)})")
+                
+                # Проверяем элементы после инструкции
+                if instruction_pos is not None:
+                    for i in range(instruction_pos + 1, len(parent)):
+                        element = parent[i]
+                        if element.tag.endswith('tbl'):
+                            # Найдена таблица - извлекаем её
+                            # Находим индекс таблицы в doc.tables
+                            # Считаем все таблицы до текущей позиции
+                            table_num = sum(1 for j, e in enumerate(parent[:i+1]) if e.tag.endswith('tbl')) - 1
+                            logger.info(f"📋 Найдена таблица в XML на позиции {i}, индекс в doc.tables: {table_num}")
+                            
+                            if table_num < len(doc.tables):
+                                table = doc.tables[table_num]
+                                table_data = []
+                                for row in table.rows:
+                                    row_data = [cell.text.strip() for cell in row.cells]
+                                    table_data.append(row_data)
+                                result["table_data"] = table_data
+                                logger.info(f"✅ Извлечена таблица для пункта {paragraph_num} ({len(table_data)} строк, {len(table_data[0]) if table_data else 0} столбцов)")
+                            else:
+                                logger.warning(f"⚠️ Индекс таблицы {table_num} выходит за пределы doc.tables (размер: {len(doc.tables)})")
+                            # Таблица найдена, останавливаем поиск текста (таблица имеет приоритет)
+                            break
+                        elif element.tag.endswith('p'):
+                            # Если встречаем параграф, проверяем, не началась ли новая инструкция
+                            para_text = ""
+                            for text_elem in element.iter():
+                                if text_elem.tag.endswith('t'):
+                                    para_text += text_elem.text or ""
+                            para_text = para_text.strip()
+                            
+                            # Если это новая инструкция, останавливаем поиск
+                            if re.match(r'^\d+[\.\):]', para_text) or \
+                               ("изложить" in para_text.lower() and "редакции" in para_text.lower() and f"пункт {paragraph_num}" not in para_text.lower()):
+                                logger.info(f"⏹️ Найдена новая инструкция в параграфе, останавливаем поиск таблицы: '{para_text[:50]}...'")
+                                break
+            
+            # Альтернативный поиск: если таблица не найдена через XML, ищем первую таблицу после инструкции по индексу
+            if result["table_data"] is None:
+                logger.info(f"🔍 Альтернативный поиск таблицы: проверяем таблицы документа...")
+                # Ищем первую таблицу, которая может быть связана с инструкцией
+                # Для этого просто берём первую таблицу в документе после параграфа инструкции
+                # (если таблиц несколько, берём ту, что ближе к инструкции)
+                if doc.tables:
+                    logger.info(f"📊 Найдено таблиц в документе: {len(doc.tables)}")
+                    # Пока просто берём первую таблицу, если она есть
+                    # В будущем можно улучшить логику поиска
+                    if len(doc.tables) > 0:
+                        table = doc.tables[0]
+                        table_data = []
+                        for row in table.rows:
+                            row_data = [cell.text.strip() for cell in row.cells]
+                            table_data.append(row_data)
+                        result["table_data"] = table_data
+                        logger.info(f"✅ Извлечена первая таблица документа для пункта {paragraph_num} (альтернативный метод)")
+            
+            # Если нет таблицы, используем текст
+            if result["table_data"] is None and text_parts:
+                result["text_content"] = "\n".join(text_parts)
+                logger.info(f"✅ Извлечен текст для пункта {paragraph_num} ({len(result['text_content'])} символов)")
+            elif result["table_data"]:
+                # Если есть таблица, но есть и текст, сохраняем текст тоже (он может быть после таблицы)
+                if text_parts:
+                    result["text_content"] = "\n".join(text_parts)
+                    logger.info(f"✅ Извлечен дополнительный текст для пункта {paragraph_num}")
+            
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка при извлечении содержимого для замены пункта {paragraph_num}: {e}")
+            return {"table_data": None, "text_content": None}
+    
+    async def _replace_entire_paragraph(
+        self,
+        filename: str,
+        paragraph_num: str,
+        new_content: Optional[str] = None,
+        table_data: Optional[List[List[str]]] = None,
+        changes_file: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Заменяет весь контент пункта, сохраняя номер пункта.
+        
+        Args:
+            filename: Путь к файлу
+            paragraph_num: Номер пункта (например, "7")
+            new_content: Новый текстовый контент (если есть)
+            table_data: Данные таблицы для вставки (если есть)
+            changes_file: Путь к файлу инструкций для извлечения таблиц
+            
+        Returns:
+            Результат операции
+        """
+        import re
+        doc = Document(filename)
+        
+        # Ищем параграф с номером пункта
+        target_para_idx = None
+        for idx, para in enumerate(doc.paragraphs):
+            para_text = para.text.strip()
+            # Проверяем различные форматы номера пункта
+            patterns = [
+                rf"^{re.escape(paragraph_num)}\.",
+                rf"^{re.escape(paragraph_num)}\)",
+                rf"^{re.escape(paragraph_num)}:",
+            ]
+            if any(re.match(p, para_text) for p in patterns):
+                target_para_idx = idx
+                logger.info(f"✅ Найден пункт {paragraph_num} в параграфе {idx}")
+                break
+        
+        if target_para_idx is None:
+            return {
+                "success": False,
+                "error": "PARAGRAPH_NOT_FOUND",
+                "message": f"Пункт {paragraph_num} не найден в документе"
+            }
+        
+        target_para = doc.paragraphs[target_para_idx]
+        original_text = target_para.text
+        
+        # Определяем границы пункта
+        start_idx = target_para_idx
+        end_idx = start_idx + 1
+        
+        # Ищем конец пункта (следующий пункт или раздел)
+        for idx in range(start_idx + 1, len(doc.paragraphs)):
+            para = doc.paragraphs[idx]
+            para_text = para.text.strip()
+            # Проверяем, не начинается ли следующий параграф с номера
+            if re.match(r'^\d+[\.\):]', para_text):
+                end_idx = idx
+                break
+            # Если параграф пустой, это может быть конец
+            if not para_text:
+                end_idx = idx
+                break
+        
+        # Удаляем содержимое пункта (кроме номера)
+        # Сохраняем номер пункта
+        num_pattern = None
+        for pattern in [rf"^{re.escape(paragraph_num)}\.", rf"^{re.escape(paragraph_num)}\)", rf"^{re.escape(paragraph_num)}:"]:
+            if re.match(pattern, original_text):
+                num_pattern = re.match(pattern, original_text).group(0)
+                break
+        
+        if not num_pattern:
+            num_pattern = f"{paragraph_num}."
+        
+        # Удаляем параграфы пункта (кроме первого, где номер)
+        for idx in range(end_idx - 1, start_idx, -1):
+            DocumentChangeAgent._delete_paragraph(doc.paragraphs[idx])
+        
+        # Очищаем первый параграф, оставляя только номер
+        for run in target_para.runs:
+            run.text = ""
+        target_para.add_run(num_pattern)
+        
+        # Если есть новая таблица, вставляем её после номера пункта
+        if table_data:
+            # Создаем таблицу
+            table = doc.add_table(rows=len(table_data), cols=len(table_data[0]) if table_data else 0)
+            
+            # Заполняем таблицу
+            for row_idx, row_data in enumerate(table_data):
+                if row_idx < len(table.rows):
+                    for col_idx, cell_text in enumerate(row_data):
+                        if col_idx < len(table.rows[row_idx].cells):
+                            table.rows[row_idx].cells[col_idx].text = str(cell_text) if cell_text else ""
+            
+            # Перемещаем таблицу после параграфа с номером
+            table_element = table._element
+            para_element = target_para._p
+            parent = para_element.getparent()
+            if parent is not None:
+                # Удаляем таблицу из текущего места
+                table_element.getparent().remove(table_element)
+                # Вставляем после параграфа
+                para_element.addnext(table_element)
+                logger.info(f"✅ Таблица вставлена после пункта {paragraph_num}")
+        
+        # Если есть текстовый контент, добавляем его после номера (или после таблицы)
+        if new_content:
+            if table_data:
+                # Текст добавляем после таблицы
+                new_para = doc.add_paragraph(new_content)
+                # Перемещаем параграф после таблицы
+                para_element = target_para._p
+                # Находим элемент таблицы
+                table_element = None
+                for sibling in para_element.itersiblings():
+                    if sibling.tag.endswith('tbl'):
+                        table_element = sibling
+                        break
+                if table_element is not None:
+                    new_para_element = new_para._p
+                    table_element.addnext(new_para_element)
+            else:
+                # Текст добавляем сразу после номера
+                new_para = doc.add_paragraph(new_content)
+                para_element = target_para._p
+                new_para_element = new_para._p
+                para_element.addnext(new_para_element)
+            
+            logger.info(f"✅ Текст вставлен после пункта {paragraph_num}")
+        
+        doc.save(filename)
+        
+        return {
+            "success": True,
+            "paragraph_index": start_idx,
+            "message": f"Пункт {paragraph_num} заменен успешно"
+        }
+    
+    async def _intelligent_paragraph_replacement(self, filename: str, target_text: str, new_text: str, description: str, matches: List, changes_file: Optional[str] = None) -> Dict[str, Any]:
         """
         Интеллектуальная замена в параграфах - заменяет содержимое, а не номер пункта.
         Использует LLM для поиска пункта и определения его местоположения.
@@ -5010,10 +5694,84 @@ class DocumentChangeAgent:
             
             # Извлекаем номер пункта из описания
             import re
-            punkt_match = re.search(r'пункте\s+(\d+)', description, re.IGNORECASE)
+            punkt_match = re.search(r'пункт[е]?\s+(\d+)', description, re.IGNORECASE)
             punkt_number = punkt_match.group(1) if punkt_match else None
+            if not punkt_number and target_text:
+                # Пробуем извлечь из target_text (может быть "7.")
+                num_match = re.match(r'^(\d+)', target_text.replace(".", "").replace(")", "").replace(":", ""))
+                if num_match:
+                    punkt_number = num_match.group(1)
             
             logger.info(f"   Номер пункта из описания: {punkt_number}")
+            
+            # Проверяем, является ли это полной заменой пункта "Изложить пункт X в новой редакции"
+            # Эту проверку делаем ПЕРВОЙ, так как для полной замены target_text может быть номером пункта
+            is_full_replacement = (
+                "изложить" in description.lower() and 
+                "пункт" in description.lower() and 
+                ("редакции" in description.lower() or "редакция" in description.lower())
+            )
+            
+            # КРИТИЧЕСКАЯ ПРОВЕРКА: Если target_text является номером пункта, это ошибка
+            # НО: для полной замены пункта (is_full_replacement) это допустимо - пропускаем проверку
+            # Номер пункта НИКОГДА не должен быть target_text для замены, КРОМЕ случаев полной замены пункта
+            if not is_full_replacement and punkt_number and target_text:
+                # Проверяем, является ли target_text номером пункта (например, "32", "32.", "32)")
+                target_clean = target_text.strip().replace(".", "").replace(")", "").replace(":", "").replace(" ", "")
+                if target_clean == punkt_number:
+                    logger.error(f"   ❌ ОШИБКА: target_text '{target_text}' является номером пункта {punkt_number}!")
+                    logger.error(f"   ❌ Номер пункта НИКОГДА не должен быть target_text для замены!")
+                    logger.error(f"   ❌ Нужно извлечь правильный target_text из описания: '{description}'")
+                    return {
+                        "success": False,
+                        "error": "INVALID_TARGET_TEXT",
+                        "message": f"target_text '{target_text}' является номером пункта, а не текстом для замены. Нужно извлечь правильный текст из описания."
+                    }
+                
+                # Также проверяем, что target_text не начинается с номера пункта
+                if target_text.strip().startswith(f"{punkt_number}.") or \
+                   target_text.strip().startswith(f"{punkt_number})") or \
+                   target_text.strip().startswith(f"{punkt_number}:"):
+                    logger.error(f"   ❌ ОШИБКА: target_text '{target_text}' начинается с номера пункта!")
+                    return {
+                        "success": False,
+                        "error": "INVALID_TARGET_TEXT",
+                        "message": f"target_text '{target_text}' содержит номер пункта, который не должен заменяться."
+                    }
+            
+            # Если это полная замена пункта, используем специальную функцию
+            if is_full_replacement and punkt_number:
+                logger.info(f"🔍 ПОЛНАЯ ЗАМЕНА ПУНКТА {punkt_number}: извлечение содержимого из инструкций")
+                
+                # Извлекаем содержимое (таблицу и/или текст) из инструкций
+                table_data = None
+                extracted_text = None
+                if changes_file:
+                    content = self._extract_content_for_paragraph_replacement(changes_file, punkt_number)
+                    table_data = content.get("table_data")
+                    extracted_text = content.get("text_content")
+                    
+                    if table_data:
+                        logger.info(f"✅ Найдена таблица для пункта {punkt_number} в инструкциях")
+                    if extracted_text:
+                        logger.info(f"✅ Найден текст для пункта {punkt_number} в инструкциях ({len(extracted_text)} символов)")
+                
+                # Используем извлеченный текст, если он есть, иначе используем new_text из LLM
+                final_text = extracted_text if extracted_text else (new_text if new_text else None)
+                
+                # Выполняем замену пункта
+                result = await self._replace_entire_paragraph(
+                    filename=filename,
+                    paragraph_num=punkt_number,
+                    new_content=final_text,
+                    table_data=table_data,
+                    changes_file=changes_file
+                )
+                
+                if result.get("success"):
+                    return result
+                else:
+                    logger.warning(f"⚠️ Замена всего пункта не удалась, продолжаем с обычной логикой: {result.get('message')}")
             
             # ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК ПУНКТА ЧЕРЕЗ LLM
             llm_location = None
@@ -5041,22 +5799,52 @@ class DocumentChangeAgent:
                         row = table.rows[row_idx]
                         logger.info(f"   📍 LLM указал: Таблица {table_idx}, Строка {row_idx}")
                         
+                        # Определяем, в какой ячейке находится номер пункта, чтобы исключить её из поиска
+                        punkt_cell_idx_llm = None
+                        if punkt_number:
+                            punkt_patterns_llm = [
+                                f"{punkt_number}.",
+                                f"{punkt_number})",
+                                f"{punkt_number}:",
+                                f"{punkt_number} ",
+                                f"пункт {punkt_number}",
+                                f"п.{punkt_number}",
+                            ]
+                            for idx, cell in enumerate(row.cells):
+                                cell_text = cell.text.strip()
+                                for pattern in punkt_patterns_llm:
+                                    if re.match(rf"^{re.escape(pattern)}\b", cell_text) or re.search(rf"\b{re.escape(pattern)}\b", cell_text):
+                                        punkt_cell_idx_llm = idx
+                                        logger.info(f"   📍 Номер пункта найден в ячейке {idx}, исключаем её из поиска target_text (LLM)")
+                                        break
+                                if punkt_cell_idx_llm is not None:
+                                    break
+                        
                         # Ищем target_text в указанной строке
                         found_cell = None
                         cell_idx = llm_location.get("cell_index")
                         
                         if cell_idx is not None and cell_idx < len(row.cells):
-                            # LLM указал конкретную ячейку
-                            found_cell = row.cells[cell_idx]
-                            if target_text in found_cell.text:
-                                logger.info(f"   ✅ Найден target_text в указанной ячейке {cell_idx}")
-                            else:
-                                logger.warning(f"   ⚠️ target_text не найден в указанной ячейке {cell_idx}, ищем во всей строке")
+                            # LLM указал конкретную ячейку, но проверяем, что это не ячейка с номером пункта
+                            if punkt_cell_idx_llm is not None and cell_idx == punkt_cell_idx_llm:
+                                logger.warning(f"   ⚠️ LLM указал ячейку {cell_idx} с номером пункта, ищем target_text в других ячейках")
                                 found_cell = None
+                            else:
+                                found_cell = row.cells[cell_idx]
+                                if target_text in found_cell.text:
+                                    logger.info(f"   ✅ Найден target_text в указанной ячейке {cell_idx}")
+                                else:
+                                    logger.warning(f"   ⚠️ target_text не найден в указанной ячейке {cell_idx}, ищем во всей строке")
+                                    found_cell = None
                         
                         if not found_cell:
-                            # Ищем target_text во всех ячейках строки
+                            # Ищем target_text во всех ячейках строки, ИСКЛЮЧАЯ ячейку с номером пункта
                             for idx, cell in enumerate(row.cells):
+                                # Пропускаем ячейку с номером пункта
+                                if punkt_cell_idx_llm is not None and idx == punkt_cell_idx_llm:
+                                    logger.info(f"   ⏭️ Пропускаем ячейку {idx} (содержит номер пункта {punkt_number})")
+                                    continue
+                                
                                 if target_text in cell.text:
                                     found_cell = cell
                                     cell_idx = idx
@@ -5071,7 +5859,7 @@ class DocumentChangeAgent:
                             if not use_structured:
                                 # Простая замена
                                 para = found_cell.paragraphs[0] if found_cell.paragraphs else None
-                                if self._smart_replace_in_paragraph(para, target_text, new_text, cell=found_cell):
+                                if self._smart_replace_in_paragraph(para, target_text, new_text, cell=found_cell, punkt_number=punkt_number):
                                     replacements_made += 1
                                     logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {row_idx}, Column {cell_idx} (LLM)")
                                     table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
@@ -5120,26 +5908,185 @@ class DocumentChangeAgent:
                                     result["paragraph_index"] = table_location.get("paragraph_index", -1)
                                 return result
             
-            # Если LLM определил местоположение в параграфе, используем эту информацию
+            # Если LLM определил местоположение в параграфе, проверяем сначала таблицы, если matches содержат таблицы
+            # Это важно, потому что LLM может ошибиться, и пункт может быть в таблице
             elif llm_location and llm_location.get("location_type") == "paragraph":
-                para_idx = llm_location.get("paragraph_index")
-                if para_idx is not None and para_idx < len(doc.paragraphs):
-                    para = doc.paragraphs[para_idx]
-                    if target_text in para.text:
-                        logger.info(f"   📍 LLM указал: Параграф {para_idx}")
-                        if self._smart_replace_in_paragraph(para, target_text, new_text):
-                            replacements_made += 1
-                            logger.info(f"   ✅ Замена выполнена в параграфе {para_idx} (LLM)")
-                            doc.save(filename)
-                            return {
-                                "success": True,
-                                "message": f"Замена выполнена (LLM: параграф {para_idx})",
-                                "replacements_made": replacements_made,
-                                "method": "llm_guided_paragraph_replace",
-                                "is_table_change": False,
-                            }
+                # Если matches содержат таблицы и есть punkt_number, сначала проверяем таблицы
+                table_matches_check = [m for m in matches if hasattr(m, 'paragraph_index') and m.paragraph_index == -1] if matches else []
+                if table_matches_check and punkt_number:
+                    logger.info(f"   ⚠️ LLM определил параграф, но matches содержат таблицы, сначала проверяем таблицы")
+                    # Пропускаем проверку параграфа LLM и продолжаем к поиску в таблицах
+                else:
+                    para_idx = llm_location.get("paragraph_index")
+                    if para_idx is not None and para_idx < len(doc.paragraphs):
+                        para = doc.paragraphs[para_idx]
+                        if target_text in para.text:
+                            logger.info(f"   📍 LLM указал: Параграф {para_idx}")
+                            if self._smart_replace_in_paragraph(para, target_text, new_text, punkt_number=punkt_number):
+                                replacements_made += 1
+                                logger.info(f"   ✅ Замена выполнена в параграфе {para_idx} (LLM)")
+                                doc.save(filename)
+                                return {
+                                    "success": True,
+                                    "message": f"Замена выполнена (LLM: параграф {para_idx})",
+                                    "replacements_made": replacements_made,
+                                    "method": "llm_guided_paragraph_replace",
+                                    "is_table_change": False,
+                                }
             
             # Если LLM не определил или не использовался, продолжаем с алгоритмическим подходом
+            # ПРИОРИТЕТ: Если есть punkt_number и matches содержат таблицы, сначала проверяем таблицы
+            table_matches_priority = [m for m in matches if hasattr(m, 'paragraph_index') and m.paragraph_index == -1] if matches else []
+            should_check_tables_first = punkt_number and table_matches_priority and replacements_made == 0
+            
+            # Если нужно проверить таблицы в первую очередь, делаем это перед поиском в параграфах
+            table_location_priority = None
+            if should_check_tables_first:
+                logger.info(f"   🔍 ПРИОРИТЕТ: Сначала проверяем таблицы для пункта {punkt_number} (matches содержат таблицы)")
+                for table_idx, table in enumerate(doc.tables):
+                    for row_idx, row in enumerate(table.rows):
+                        # Проверяем, содержит ли строка номер пункта
+                        row_contains_punkt = False
+                        punkt_patterns = [
+                            f"{punkt_number}.",
+                            f"{punkt_number})",
+                            f"{punkt_number}:",
+                            f"{punkt_number} ",
+                            f"пункт {punkt_number}",
+                            f"п.{punkt_number}",
+                        ]
+                        for cell in row.cells:
+                            cell_text = cell.text.strip()
+                            for pattern in punkt_patterns:
+                                # Используем точное сопоставление в начале ячейки или после пробела
+                                if re.match(rf"^{re.escape(pattern)}\b", cell_text) or re.search(rf"\b{re.escape(pattern)}\b", cell_text):
+                                    row_contains_punkt = True
+                                    logger.info(f"   ✅ Строка {row_idx} в таблице {table_idx} содержит номер пункта {punkt_number} (паттерн: '{pattern}')")
+                                    break
+                            if row_contains_punkt:
+                                break
+                        
+                        # Определяем, в какой строке находится пункт (может быть в текущей или соседней)
+                        punkt_row_idx = row_idx if row_contains_punkt else None
+                        
+                        # Если не нашли в текущей строке, проверяем соседние строки
+                        if not row_contains_punkt:
+                            for offset in [-1, 1]:
+                                check_row_idx = row_idx + offset
+                                if 0 <= check_row_idx < len(table.rows):
+                                    check_row = table.rows[check_row_idx]
+                                    for cell in check_row.cells:
+                                        cell_text = cell.text.strip()
+                                        for pattern in punkt_patterns:
+                                            if re.match(rf"^{re.escape(pattern)}\b", cell_text) or re.search(rf"\b{re.escape(pattern)}\b", cell_text):
+                                                row_contains_punkt = True
+                                                punkt_row_idx = check_row_idx
+                                                logger.info(f"   ✅ Пункт {punkt_number} найден в соседней строке {check_row_idx} таблицы {table_idx}")
+                                                break
+                                        if row_contains_punkt:
+                                            break
+                                    if row_contains_punkt:
+                                        break
+                        
+                        # Если нашли строку с пунктом, ищем target_text ТОЛЬКО в ячейках этой строки
+                        if row_contains_punkt and punkt_row_idx is not None:
+                            punkt_row = table.rows[punkt_row_idx]
+                            logger.info(f"   🔍 Поиск target_text '{target_text}' в ячейках строки {punkt_row_idx} таблицы {table_idx} (пункт {punkt_number})")
+                            
+                            # Определяем, в какой ячейке находится номер пункта (обычно первая ячейка)
+                            punkt_cell_idx = None
+                            for cell_idx, cell in enumerate(punkt_row.cells):
+                                cell_text = cell.text.strip()
+                                for pattern in punkt_patterns:
+                                    if re.match(rf"^{re.escape(pattern)}\b", cell_text) or re.search(rf"\b{re.escape(pattern)}\b", cell_text):
+                                        punkt_cell_idx = cell_idx
+                                        logger.info(f"   📍 Номер пункта найден в ячейке {cell_idx}, исключаем её из поиска target_text")
+                                        break
+                                if punkt_cell_idx is not None:
+                                    break
+                            
+                            # Ищем target_text только в ячейках БЕЗ номера пункта
+                            for cell_idx, cell in enumerate(punkt_row.cells):
+                                # Пропускаем ячейку с номером пункта
+                                if punkt_cell_idx is not None and cell_idx == punkt_cell_idx:
+                                    logger.info(f"   ⏭️ Пропускаем ячейку {cell_idx} (содержит номер пункта {punkt_number})")
+                                    continue
+                                
+                                cell_text = cell.text
+                                # Проверяем, что target_text не является частью номера пункта
+                                # (например, если target_text = "32", не заменяем в ячейке с "32.")
+                                is_target_part_of_punkt_number = False
+                                if punkt_number:
+                                    punkt_variants = [f"{punkt_number}.", f"{punkt_number})", f"{punkt_number}:", f"{punkt_number} ", punkt_number]
+                                    for variant in punkt_variants:
+                                        if variant in cell_text:
+                                            # Проверяем, что target_text является частью номера пункта, а не отдельным текстом
+                                            if target_text == punkt_number or target_text in variant:
+                                                is_target_part_of_punkt_number = True
+                                                logger.info(f"   ⏭️ target_text '{target_text}' является частью номера пункта в ячейке {cell_idx}, пропускаем")
+                                                break
+                                
+                                if not is_target_part_of_punkt_number and target_text in cell_text:
+                                    logger.info(f"   ✅ Найдена ячейка Table {table_idx}, Row {punkt_row_idx}, Column {cell_idx} с текстом '{target_text[:50]}...' (пункт {punkt_number})")
+                                    use_structured = self._should_use_structured_replacement(description)
+                                    
+                                    if not use_structured:
+                                        para = cell.paragraphs[0] if cell.paragraphs else None
+                                        if self._smart_replace_in_paragraph(para, target_text, new_text, cell=cell, punkt_number=punkt_number):
+                                            replacements_made += 1
+                                            logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {punkt_row_idx}, Column {cell_idx}")
+                                            if table_location_priority is None:
+                                                table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                if table_paragraph_index >= 0:
+                                                    table_location_priority = {
+                                                        "table_idx": table_idx,
+                                                        "row_idx": punkt_row_idx,
+                                                        "cell_idx": cell_idx,
+                                                        "paragraph_index": table_paragraph_index
+                                                    }
+                                            break
+                                        else:
+                                            row_structure = self._analyze_row_structure(punkt_row, punkt_row_idx)
+                                            table_context = self._get_table_context(table, punkt_row_idx)
+                                            distribution = await self._map_new_text_to_structure(
+                                                new_text=new_text,
+                                                target_text=target_text,
+                                                row_structure=row_structure,
+                                                description=description,
+                                                table_context=table_context
+                                            )
+                                            if self._apply_structured_replacement(punkt_row, target_text, distribution):
+                                                replacements_made += 1
+                                                logger.info(f"   ✅ Структурированная замена выполнена в строке {punkt_row_idx} таблицы {table_idx}")
+                                                if table_location_priority is None:
+                                                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                    if table_paragraph_index >= 0:
+                                                        table_location_priority = {
+                                                            "table_idx": table_idx,
+                                                            "row_idx": punkt_row_idx,
+                                                            "cell_idx": cell_idx,
+                                                            "paragraph_index": table_paragraph_index
+                                                        }
+                                                break
+                            if replacements_made > 0:
+                                break
+                    if replacements_made > 0:
+                        break
+                
+                # Если замена выполнена в таблице, возвращаем результат
+                if replacements_made > 0:
+                    doc.save(filename)
+                    result = {
+                        "success": True,
+                        "message": f"Замена выполнена в таблице (пункт {punkt_number})",
+                        "replacements_made": replacements_made,
+                        "method": "priority_table_replace",
+                        "is_table_change": True,
+                    }
+                    if table_location_priority:
+                        result["table_location"] = table_location_priority
+                        result["paragraph_index"] = table_location_priority.get("paragraph_index", -1)
+                    return result
             
             # Ищем параграфы, которые начинаются с этого номера пункта
             target_paragraphs = []
@@ -5206,7 +6153,7 @@ class DocumentChangeAgent:
             for para_idx, para in target_paragraphs:
                 if target_text in para.text:
                     logger.info(f"   Замена в параграфе {para_idx}: '{target_text}' → '{new_text}'")
-                    if self._smart_replace_in_paragraph(para, target_text, new_text):
+                    if self._smart_replace_in_paragraph(para, target_text, new_text, punkt_number=punkt_number):
                         replacements_made += 1
                         logger.info(f"   ✅ Успешная замена в параграфе {para_idx}")
                         # Если есть номер пункта, обрабатываем только первый найденный
@@ -5243,101 +6190,98 @@ class DocumentChangeAgent:
                                 if row_contains_punkt:
                                     break
                             
-                            # Также проверяем соседние строки (предыдущую и следующую) на наличие номера пункта
-                            if not row_contains_punkt:
-                                for offset in [-1, 1]:
-                                    check_row_idx = row_idx + offset
-                                    if 0 <= check_row_idx < len(table.rows):
-                                        check_row = table.rows[check_row_idx]
-                                        for cell in check_row.cells:
-                                            cell_text = cell.text
-                                            for pattern in punkt_patterns:
-                                                if pattern in cell_text:
-                                                    row_contains_punkt = True
-                                                    logger.info(f"   ✅ Строка {row_idx} (рядом со строкой {check_row_idx}) в таблице {table_idx} связана с пунктом {punkt_number} (паттерн: '{pattern}')")
-                                                    break
-                                            if row_contains_punkt:
-                                                break
-                                        if row_contains_punkt:
-                                            break
-                            
-                            # Если строка содержит номер пункта, ищем target_text в ячейках этой строки и соседних
+                            # Если строка содержит номер пункта, ищем target_text ТОЛЬКО в ячейках этой строки
                             if row_contains_punkt:
-                                # Проверяем текущую строку
-                                rows_to_search = [row_idx]
-                                # Если номер пункта был найден в текущей строке, проверяем и соседние на наличие target_text
-                                # (потому что target_text может быть в соседней строке)
-                                for offset in [-1, 1]:
-                                    check_row_idx = row_idx + offset
-                                    if 0 <= check_row_idx < len(table.rows):
-                                        rows_to_search.append(check_row_idx)
+                                logger.info(f"   🔍 Поиск target_text '{target_text}' в ячейках строки {row_idx} таблицы {table_idx} (пункт {punkt_number})")
                                 
-                                # Ищем target_text во всех релевантных строках и применяем универсальный алгоритм
-                                for search_row_idx in rows_to_search:
-                                    search_row = table.rows[search_row_idx]
-                                    for cell_idx, cell in enumerate(search_row.cells):
-                                        cell_text = cell.text
-                                        if target_text in cell_text:
-                                            logger.info(f"   ✅ Найдена ячейка Table {table_idx}, Row {search_row_idx}, Column {cell_idx} с текстом '{target_text[:50]}...' (связана с пунктом {punkt_number} в строке {row_idx})")
-                                            # Определяем тип замены на основе описания инструкции
-                                            use_structured = self._should_use_structured_replacement(description)
-                                            
-                                            if not use_structured:
-                                                # Простая замена фразы в найденной ячейке
-                                                logger.info(f"   🔄 Простая замена фразы в ячейке (не распределение по столбцам)")
-                                                para = cell.paragraphs[0] if cell.paragraphs else None
-                                                if self._smart_replace_in_paragraph(para, target_text, new_text, cell=cell):
-                                                    replacements_made += 1
-                                                    logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {search_row_idx}, Column {cell_idx}")
-                                                    # Сохраняем информацию о местоположении для аннотаций
-                                                    if table_location is None:
-                                                        table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
-                                                        if table_paragraph_index >= 0:
-                                                            table_location = {
-                                                                "table_idx": table_idx,
-                                                                "row_idx": search_row_idx,
-                                                                "cell_idx": cell_idx,
-                                                                "paragraph_index": table_paragraph_index
-                                                            }
-                                                            logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {search_row_idx}, Para {table_paragraph_index}")
-                                                    break
-                                            else:
-                                                # Структурированная замена (распределение по столбцам)
-                                                logger.info(f"   🔄 Структурированная замена (распределение по столбцам)")
-                                                # Анализируем структуру строки
-                                                row_structure = self._analyze_row_structure(search_row, search_row_idx)
-                                                # Получаем контекст таблицы для LLM
-                                                table_context = self._get_table_context(table, search_row_idx)
-                                                # Распределяем новый текст по структуре (алгоритм + LLM проверка)
-                                                distribution = await self._map_new_text_to_structure(
-                                                    new_text=new_text,
-                                                    target_text=target_text,
-                                                    row_structure=row_structure,
-                                                    description=description,
-                                                    table_context=table_context
-                                                )
-                                                # Применяем структурированную замену
-                                                if self._apply_structured_replacement(search_row, target_text, distribution):
-                                                    replacements_made += 1
-                                                    logger.info(f"   ✅ Структурированная замена выполнена в строке {search_row_idx} таблицы {table_idx}")
-                                                    # Сохраняем информацию о местоположении для аннотаций
-                                                    if table_location is None:
-                                                        table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
-                                                        if table_paragraph_index >= 0:
-                                                            table_location = {
-                                                                "table_idx": table_idx,
-                                                                "row_idx": search_row_idx,
-                                                                "cell_idx": cell_idx,
-                                                                "paragraph_index": table_paragraph_index
-                                                            }
-                                                            logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {search_row_idx}, Para {table_paragraph_index}")
-                                                    break
-                                    if replacements_made > 0:
+                                # Определяем, в какой ячейке находится номер пункта (обычно первая ячейка)
+                                punkt_cell_idx = None
+                                for check_cell_idx, check_cell in enumerate(row.cells):
+                                    check_cell_text = check_cell.text.strip()
+                                    for pattern in punkt_patterns:
+                                        if re.match(rf"^{re.escape(pattern)}\b", check_cell_text) or re.search(rf"\b{re.escape(pattern)}\b", check_cell_text):
+                                            punkt_cell_idx = check_cell_idx
+                                            logger.info(f"   📍 Номер пункта найден в ячейке {check_cell_idx}, исключаем её из поиска target_text")
+                                            break
+                                    if punkt_cell_idx is not None:
                                         break
-                                if replacements_made > 0:
-                                    break
-                                    if replacements_made > 0:
-                                        break
+                                
+                                # Ищем target_text только в ячейках БЕЗ номера пункта
+                                for cell_idx, cell in enumerate(row.cells):
+                                    # Пропускаем ячейку с номером пункта
+                                    if punkt_cell_idx is not None and cell_idx == punkt_cell_idx:
+                                        logger.info(f"   ⏭️ Пропускаем ячейку {cell_idx} (содержит номер пункта {punkt_number})")
+                                        continue
+                                    
+                                    cell_text = cell.text
+                                    # Проверяем, что target_text не является частью номера пункта
+                                    # (например, если target_text = "32", не заменяем в ячейке с "32.")
+                                    is_target_part_of_punkt_number = False
+                                    if punkt_number:
+                                        punkt_variants = [f"{punkt_number}.", f"{punkt_number})", f"{punkt_number}:", f"{punkt_number} ", punkt_number]
+                                        for variant in punkt_variants:
+                                            if variant in cell_text:
+                                                # Проверяем, что target_text является частью номера пункта, а не отдельным текстом
+                                                if target_text == punkt_number or target_text in variant:
+                                                    is_target_part_of_punkt_number = True
+                                                    logger.info(f"   ⏭️ target_text '{target_text}' является частью номера пункта в ячейке {cell_idx}, пропускаем")
+                                                    break
+                                    
+                                    if not is_target_part_of_punkt_number and target_text in cell_text:
+                                        logger.info(f"   ✅ Найдена ячейка Table {table_idx}, Row {row_idx}, Column {cell_idx} с текстом '{target_text[:50]}...' (пункт {punkt_number})")
+                                        # Определяем тип замены на основе описания инструкции
+                                        use_structured = self._should_use_structured_replacement(description)
+                                        
+                                        if not use_structured:
+                                            # Простая замена фразы в найденной ячейке
+                                            logger.info(f"   🔄 Простая замена фразы в ячейке (не распределение по столбцам)")
+                                            para = cell.paragraphs[0] if cell.paragraphs else None
+                                            if self._smart_replace_in_paragraph(para, target_text, new_text, cell=cell, punkt_number=punkt_number):
+                                                replacements_made += 1
+                                                logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {row_idx}, Column {cell_idx}")
+                                                # Сохраняем информацию о местоположении для аннотаций
+                                                if table_location is None:
+                                                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                    if table_paragraph_index >= 0:
+                                                        table_location = {
+                                                            "table_idx": table_idx,
+                                                            "row_idx": row_idx,
+                                                            "cell_idx": cell_idx,
+                                                            "paragraph_index": table_paragraph_index
+                                                        }
+                                                        logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {row_idx}, Para {table_paragraph_index}")
+                                                break
+                                        else:
+                                            # Структурированная замена (распределение по столбцам)
+                                            logger.info(f"   🔄 Структурированная замена (распределение по столбцам)")
+                                            # Анализируем структуру строки
+                                            row_structure = self._analyze_row_structure(row, row_idx)
+                                            # Получаем контекст таблицы для LLM
+                                            table_context = self._get_table_context(table, row_idx)
+                                            # Распределяем новый текст по структуре (алгоритм + LLM проверка)
+                                            distribution = await self._map_new_text_to_structure(
+                                                new_text=new_text,
+                                                target_text=target_text,
+                                                row_structure=row_structure,
+                                                description=description,
+                                                table_context=table_context
+                                            )
+                                            # Применяем структурированную замену
+                                            if self._apply_structured_replacement(row, target_text, distribution):
+                                                replacements_made += 1
+                                                logger.info(f"   ✅ Структурированная замена выполнена в строке {row_idx} таблицы {table_idx}")
+                                                # Сохраняем информацию о местоположении для аннотаций
+                                                if table_location is None:
+                                                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                    if table_paragraph_index >= 0:
+                                                        table_location = {
+                                                            "table_idx": table_idx,
+                                                            "row_idx": row_idx,
+                                                            "cell_idx": cell_idx,
+                                                            "paragraph_index": table_paragraph_index
+                                                        }
+                                                        logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {row_idx}, Para {table_paragraph_index}")
+                                                break
                                 if replacements_made > 0:
                                     break
                         if replacements_made > 0:
@@ -5360,7 +6304,7 @@ class DocumentChangeAgent:
                                             # Простая замена фразы в найденной ячейке
                                             logger.info(f"   🔄 Простая замена фразы в ячейке (не распределение по столбцам)")
                                             para = cell.paragraphs[0] if cell.paragraphs else None
-                                            if self._smart_replace_in_paragraph(para, target_text, new_text, cell=cell):
+                                            if self._smart_replace_in_paragraph(para, target_text, new_text, cell=cell, punkt_number=punkt_number):
                                                 replacements_made += 1
                                                 logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {row_idx}, Column {cell_idx}")
                                                 # Сохраняем информацию о местоположении для аннотаций
@@ -5446,7 +6390,94 @@ class DocumentChangeAgent:
                 "message": f"Ошибка интеллектуальной замены в пункте: {e}"
             }
 
-    def _smart_replace_in_paragraph(self, paragraph, old: str, new: str, cell=None) -> bool:
+    def _is_target_part_of_punkt_number(self, target_text: str, cell_text: str, punkt_number: Optional[str] = None) -> bool:
+        """
+        Проверяет, является ли target_text частью номера пункта в cell_text.
+        
+        Args:
+            target_text: Текст для поиска
+            cell_text: Текст ячейки
+            punkt_number: Номер пункта (опционально)
+            
+        Returns:
+            True если target_text является частью номера пункта
+        """
+        import re
+        
+        # Если указан номер пункта, проверяем напрямую
+        if punkt_number:
+            punkt_variants = [
+                f"{punkt_number}.",
+                f"{punkt_number})",
+                f"{punkt_number}:",
+                f"{punkt_number} ",
+                punkt_number
+            ]
+            target_clean = target_text.strip().replace(".", "").replace(")", "").replace(":", "").replace(" ", "")
+            
+            # Проверяем, совпадает ли target_text с номером пункта
+            if target_clean == punkt_number:
+                return True
+            
+            # Проверяем, является ли target_text частью варианта номера пункта
+            for variant in punkt_variants:
+                if target_text == variant or target_text in variant:
+                    # Дополнительная проверка: убеждаемся, что это действительно номер пункта в тексте
+                    if variant in cell_text:
+                        # Проверяем, что это в начале строки или после пробела
+                        if re.match(rf"^{re.escape(variant)}\b", cell_text.strip()) or \
+                           re.search(rf"\b{re.escape(variant)}\b", cell_text.strip()):
+                            return True
+        
+        # Если punkt_number не передан, пытаемся определить его из cell_text
+        if not punkt_number:
+            punkt_match = re.match(r'^(\d+[\.\):]?\s*)', cell_text.strip())
+            if punkt_match:
+                punkt_prefix = punkt_match.group(1)
+                punkt_num_match = re.match(r'^(\d+)', punkt_prefix)
+                if punkt_num_match:
+                    punkt_number = punkt_num_match.group(1)
+        
+        # Если теперь есть punkt_number, проверяем еще раз
+        if punkt_number:
+            punkt_variants = [
+                f"{punkt_number}.",
+                f"{punkt_number})",
+                f"{punkt_number}:",
+                f"{punkt_number} ",
+                punkt_number
+            ]
+            target_clean = target_text.strip().replace(".", "").replace(")", "").replace(":", "").replace(" ", "")
+            punkt_clean = punkt_number.strip().replace(".", "").replace(")", "").replace(":", "").replace(" ", "")
+            
+            # Если target_text равен номеру пункта
+            if target_clean == punkt_clean:
+                return True
+            
+            # Проверяем, является ли target_text частью варианта номера пункта
+            for variant in punkt_variants:
+                if target_text == variant or target_text in variant:
+                    # Дополнительная проверка: убеждаемся, что это действительно номер пункта в тексте
+                    if variant in cell_text:
+                        # Проверяем, что это в начале строки или после пробела
+                        if re.match(rf"^{re.escape(variant)}\b", cell_text.strip()) or \
+                           re.search(rf"\b{re.escape(variant)}\b", cell_text.strip()):
+                            return True
+        
+        # Проверяем, начинается ли cell_text с номера пункта, содержащего target_text
+        punkt_match = re.match(r'^(\d+[\.\):]?\s*)', cell_text.strip())
+        if punkt_match:
+            punkt_prefix = punkt_match.group(1)
+            punkt_num_match = re.match(r'^(\d+)', punkt_prefix)
+            if punkt_num_match:
+                punkt_num = punkt_num_match.group(1)
+                target_clean = target_text.strip().replace(".", "").replace(")", "").replace(":", "").replace(" ", "")
+                if target_clean == punkt_num or target_text in punkt_prefix:
+                    return True
+        
+        return False
+
+    def _smart_replace_in_paragraph(self, paragraph, old: str, new: str, cell=None, punkt_number: Optional[str] = None) -> bool:
         """
         Умная замена в параграфе - заменяет только содержимое, не трогая номер пункта.
         
@@ -5463,6 +6494,11 @@ class DocumentChangeAgent:
         
         # Если передан cell, работаем с его параграфами
         if cell is not None:
+            # КРИТИЧЕСКАЯ ПРОВЕРКА: Убеждаемся, что target_text не является частью номера пункта
+            if punkt_number and self._is_target_part_of_punkt_number(old, cell.text, punkt_number):
+                logger.warning(f"   ⚠️ ПРОПУСК: target_text '{old}' является частью номера пункта {punkt_number} в ячейке, не заменяем!")
+                return False
+            
             # Проверяем все параграфы в ячейке
             if cell.paragraphs:
                 # Сначала пробуем найти текст в каждом параграфе и заменить его
@@ -5473,12 +6509,22 @@ class DocumentChangeAgent:
                         
                         # Проверяем, начинается ли параграф с номера пункта
                         import re
-                        punkt_match = re.match(r'^(\d+\.?\s*)', original_text)
+                        # Более точная проверка номера пункта: "32.", "32)", "32:", "32 "
+                        punkt_match = re.match(r'^(\d+[\.\):]?\s*)', original_text)
                         
                         if punkt_match:
                             # Параграф начинается с номера - заменяем только в содержимой части
                             punkt_prefix = punkt_match.group(1)
                             content_part = original_text[len(punkt_prefix):]
+                            
+                            # Проверяем, что old не является частью номера пункта
+                            punkt_number_match = re.match(r'^(\d+)', punkt_prefix)
+                            if punkt_number_match:
+                                punkt_num = punkt_number_match.group(1)
+                                # Если old равен номеру пункта или является его частью, пропускаем замену
+                                if old == punkt_num or old == punkt_prefix.strip() or self._is_target_part_of_punkt_number(old, original_text, punkt_number):
+                                    logger.warning(f"   ⚠️ target_text '{old}' является номером пункта, пропускаем замену в этой ячейке")
+                                    continue
                             
                             if old in content_part:
                                 new_content = content_part.replace(old, new)
@@ -5489,11 +6535,13 @@ class DocumentChangeAgent:
                                 logger.info(f"     Старое содержимое: '{content_part[:50]}...'")
                                 logger.info(f"     Новое содержимое: '{new_content[:50]}...'")
                                 
-                                # Заменяем через runs для сохранения форматирования
+                                # Заменяем через runs для сохранения форматирования, но только в content_part
                                 found_in_runs = False
                                 for run in para.runs:
-                                    if old in run.text:
-                                        run.text = run.text.replace(old, new)
+                                    run_text = run.text
+                                    # Проверяем, что run не содержит только номер пункта
+                                    if old in run_text and not run_text.strip().startswith(punkt_prefix.strip()):
+                                        run.text = run_text.replace(old, new)
                                         found_in_runs = True
                                 
                                 # Если не удалось через runs, заменяем весь текст
@@ -5523,16 +6571,86 @@ class DocumentChangeAgent:
                 
                 # Если не нашли текст в отдельных параграфах, пробуем заменить во всей ячейке
                 if not replaced and old in cell.text:
-                    logger.info(f"   Замена в ячейке (по всему тексту): '{old}' → '{new}'")
-                    # Заменяем напрямую в ячейке
-                    cell.text = cell.text.replace(old, new)
-                    replaced = old not in cell.text  # Проверяем, что замена прошла
+                    # КРИТИЧЕСКАЯ ПРОВЕРКА: Убеждаемся, что мы не заменяем номер пункта
+                    cell_text_full = cell.text
+                    
+                    # Проверяем, начинается ли текст ячейки с номера пункта
+                    punkt_num_match = re.match(r'^(\d+[\.\):]?\s*)', cell_text_full)
+                    if punkt_num_match:
+                        punkt_prefix = punkt_num_match.group(1)
+                        punkt_num_clean = re.match(r'^(\d+)', punkt_prefix)
+                        if punkt_num_clean:
+                            punkt_num = punkt_num_clean.group(1)
+                            # Если old равен номеру пункта, пропускаем замену
+                            old_clean = old.strip().replace(".", "").replace(")", "").replace(":", "").replace(" ", "")
+                            if old_clean == punkt_num:
+                                logger.warning(f"   ⚠️ ПРОПУСК: target_text '{old}' является номером пункта в ячейке, не заменяем!")
+                                return False
+                            
+                            # Если old является частью номера пункта, пропускаем
+                            if old in punkt_prefix or old == punkt_num:
+                                logger.warning(f"   ⚠️ ПРОПУСК: target_text '{old}' является частью номера пункта '{punkt_prefix}', не заменяем!")
+                                return False
+                            
+                            # Заменяем только в части после номера пункта
+                            content_part = cell_text_full[len(punkt_prefix):]
+                            if old in content_part:
+                                new_content = content_part.replace(old, new)
+                                cell.text = punkt_prefix + new_content
+                                logger.info(f"   Замена в ячейке (по всему тексту, сохраняя номер пункта): '{old}' → '{new}'")
+                                replaced = True
+                            else:
+                                logger.warning(f"   ⚠️ target_text '{old}' не найден в содержимом ячейки (после номера пункта)")
+                        else:
+                            # Если не удалось определить номер, заменяем осторожно
+                            logger.info(f"   Замена в ячейке (по всему тексту): '{old}' → '{new}'")
+                            cell.text = cell.text.replace(old, new)
+                            replaced = old not in cell.text
+                    else:
+                        # Нет номера пункта в начале - обычная замена
+                        logger.info(f"   Замена в ячейке (по всему тексту): '{old}' → '{new}'")
+                        cell.text = cell.text.replace(old, new)
+                        replaced = old not in cell.text
             else:
-                # Если нет параграфов, заменяем напрямую в ячейке
+                # Если нет параграфов, заменяем напрямую в ячейке, но проверяем номер пункта
                 if old in cell.text:
-                    logger.info(f"   Замена в ячейке (нет параграфов): '{old}' → '{new}'")
-                    cell.text = cell.text.replace(old, new)
-                    replaced = old not in cell.text  # Проверяем, что замена прошла
+                    cell_text_full = cell.text
+                    
+                    # Проверяем, начинается ли текст ячейки с номера пункта
+                    punkt_num_match = re.match(r'^(\d+[\.\):]?\s*)', cell_text_full)
+                    if punkt_num_match:
+                        punkt_prefix = punkt_num_match.group(1)
+                        punkt_num_clean = re.match(r'^(\d+)', punkt_prefix)
+                        if punkt_num_clean:
+                            punkt_num = punkt_num_clean.group(1)
+                            # Если old равен номеру пункта, пропускаем замену
+                            old_clean = old.strip().replace(".", "").replace(")", "").replace(":", "").replace(" ", "")
+                            if old_clean == punkt_num:
+                                logger.warning(f"   ⚠️ ПРОПУСК: target_text '{old}' является номером пункта в ячейке без параграфов, не заменяем!")
+                                return False
+                            
+                            # Если old является частью номера пункта, пропускаем
+                            if old in punkt_prefix or old == punkt_num:
+                                logger.warning(f"   ⚠️ ПРОПУСК: target_text '{old}' является частью номера пункта '{punkt_prefix}', не заменяем!")
+                                return False
+                            
+                            # Заменяем только в части после номера пункта
+                            content_part = cell_text_full[len(punkt_prefix):]
+                            if old in content_part:
+                                new_content = content_part.replace(old, new)
+                                cell.text = punkt_prefix + new_content
+                                logger.info(f"   Замена в ячейке (нет параграфов, сохраняя номер пункта): '{old}' → '{new}'")
+                                replaced = True
+                            else:
+                                logger.warning(f"   ⚠️ target_text '{old}' не найден в содержимом ячейки (после номера пункта)")
+                        else:
+                            logger.info(f"   Замена в ячейке (нет параграфов): '{old}' → '{new}'")
+                            cell.text = cell.text.replace(old, new)
+                            replaced = old not in cell.text
+                    else:
+                        logger.info(f"   Замена в ячейке (нет параграфов): '{old}' → '{new}'")
+                        cell.text = cell.text.replace(old, new)
+                        replaced = old not in cell.text
         
             return replaced
         
@@ -5680,6 +6798,7 @@ class DocumentChangeAgent:
         target = change.get("target", {})
         text_to_remove = target.get("text")
         match_case = target.get("match_case", False)
+        description = change.get("description", "")
 
         if not text_to_remove:
             return {
@@ -5688,6 +6807,288 @@ class DocumentChangeAgent:
                 "message": "Для DELETE_PARAGRAPH необходим target.text",
             }
 
+        doc = Document(filename)
+        import re
+
+        # Проверяем, является ли text_to_remove номером пункта
+        paragraph_num = None
+        if self._is_paragraph_number(text_to_remove):
+            # Извлекаем номер пункта (убираем точку, скобку и т.д.)
+            num_match = re.match(r'^(\d+)', text_to_remove.replace(".", "").replace(")", "").replace(":", ""))
+            if num_match:
+                paragraph_num = num_match.group(1)
+                logger.info(f"🔍 УДАЛЕНИЕ ПУНКТА {paragraph_num}: ищем в таблицах и параграфах")
+        
+        # ПРИОРИТЕТ 1: Если это номер пункта, сначала проверяем таблицы
+        if paragraph_num:
+            logger.info(f"🔍 ПРИОРИТЕТ 1: Удаление пункта {paragraph_num} - проверка таблиц")
+            
+            # Используем LLM для определения целевой таблицы (если в описании упоминается таблица)
+            llm_target_table_indices = None
+            if "таблице" in description.lower() or "таблиц" in description.lower():
+                try:
+                    llm_target_table_indices = await self._identify_target_table_with_llm(
+                        doc=doc,
+                        description=description,
+                        target_text=text_to_remove
+                    )
+                    if llm_target_table_indices:
+                        logger.info(f"✅ LLM определил целевые таблицы для удаления: {llm_target_table_indices}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка при LLM определении таблицы, продолжаем поиск: {e}")
+            
+            # Ищем пункт в таблицах по номеру в первой ячейке строки
+            row_deleted = False
+            table_found_idx = None
+            row_found_idx = None
+            
+            logger.info(f"   🔍 Поиск пункта {paragraph_num} в {len(doc.tables)} таблицах...")
+            for table_idx, table in enumerate(doc.tables):
+                # Если LLM определил целевые таблицы, обрабатываем только их
+                if llm_target_table_indices is not None:
+                    if table_idx not in llm_target_table_indices:
+                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не определена LLM как целевая)")
+                        continue
+                    else:
+                        logger.info(f"   ✅ Таблица {table_idx} определена LLM как целевая")
+                else:
+                    logger.info(f"   🔍 Проверяем таблицу {table_idx} (строка {len(table.rows)} строк)")
+                
+                for row_idx, row in enumerate(table.rows):
+                    if row.cells:
+                        # Проверяем первую ячейку строки на наличие номера пункта
+                        first_cell_text = row.cells[0].text.strip()
+                        
+                        # Проверяем различные форматы номера пункта с точным совпадением
+                        patterns = [
+                            rf"^{re.escape(paragraph_num)}\.",
+                            rf"^{re.escape(paragraph_num)}\)",
+                            rf"^{re.escape(paragraph_num)}:",
+                        ]
+                        
+                        # Проверяем каждый паттерн
+                        matched = False
+                        for pattern in patterns:
+                            if re.match(pattern, first_cell_text):
+                                matched = True
+                                break
+                        
+                        if matched:
+                            logger.info(f"   ✅ Найден пункт {paragraph_num} в таблице {table_idx}, строка {row_idx} (первая ячейка: '{first_cell_text}')")
+                            
+                            # Удаляем содержимое строки, оставляя только номер пункта
+                            # Сохраняем номер пункта в первой ячейке
+                            logger.info(f"   🔧 Очищаем содержимое строки, сохраняя номер пункта...")
+                            for run in row.cells[0].paragraphs[0].runs:
+                                run.text = ""
+                            row.cells[0].paragraphs[0].add_run(f"{paragraph_num}.")
+                            
+                            # Очищаем остальные ячейки строки
+                            for cell_idx in range(1, len(row.cells)):
+                                for para in row.cells[cell_idx].paragraphs:
+                                    for run in para.runs:
+                                        run.text = ""
+                            
+                            row_deleted = True
+                            table_found_idx = table_idx
+                            row_found_idx = row_idx
+                            logger.info(f"   ✅ Содержимое пункта {paragraph_num} удалено из таблицы {table_idx}, строка {row_idx} (номер пункта сохранен)")
+                            break
+                
+                # Если нашли и удалили, останавливаемся
+                if row_deleted:
+                    logger.info(f"   ✅ Удаление завершено, прекращаем поиск")
+                    break
+            
+            if not row_deleted:
+                logger.info(f"   ⚠️ Пункт {paragraph_num} не найден в таблицах, продолжаем поиск в параграфах")
+            
+            # Если пункт найден и удален из таблицы
+            if row_deleted:
+                doc.save(filename)
+                
+                # Добавляем аннотацию перед таблицей
+                table_para_idx = self._find_paragraph_for_table(doc, table_found_idx)
+                if change.get("annotation", True) and table_para_idx >= 0:
+                    await self._add_annotation(
+                        filename,
+                        table_para_idx,
+                        change,
+                        extra=f"Удалено содержимое пункта {paragraph_num} из таблицы (номер пункта сохранен)",
+                    )
+                
+                return {
+                    "success": True,
+                    "paragraph_index": table_para_idx if table_para_idx >= 0 else 0,
+                    "table_location": {
+                        "table_idx": table_found_idx,
+                        "row_idx": row_found_idx,
+                        "paragraph_index": table_para_idx if table_para_idx >= 0 else 0
+                    },
+                    "message": f"Содержимое пункта {paragraph_num} удалено из таблицы (номер сохранен)"
+                }
+        
+        # ПРИОРИТЕТ 2: Если это не номер пункта, но в описании упоминается "строка" и "таблица",
+        # то удаляем строку из таблицы по содержимому ячейки
+        is_table_row_delete = ("строка" in description.lower() or "строку" in description.lower()) and \
+                               ("таблице" in description.lower() or "таблиц" in description.lower())
+        
+        if is_table_row_delete and not paragraph_num:
+            logger.info(f"🔍 УДАЛЕНИЕ СТРОКИ ИЗ ТАБЛИЦЫ: ищем '{text_to_remove}' в таблицах")
+            
+            # Извлекаем название таблицы из описания
+            table_name = None
+            import re
+            table_name_match = re.search(r'таблиц[еи]\s+[«"]([^«"]+)[»"]', description, re.IGNORECASE)
+            if table_name_match:
+                table_name = table_name_match.group(1)
+                logger.info(f"📋 Ограничение поиска таблицей: '{table_name}'")
+            
+            # Используем LLM для определения целевой таблицы
+            llm_target_table_indices = None
+            try:
+                llm_target_table_indices = await self._identify_target_table_with_llm(
+                    doc=doc,
+                    description=description,
+                    target_text=text_to_remove,
+                    table_name=table_name
+                )
+                if llm_target_table_indices:
+                    logger.info(f"✅ LLM определил целевые таблицы для удаления строки: {llm_target_table_indices}")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при LLM определении таблицы, продолжаем поиск: {e}")
+            
+            # Если указано название таблицы, ищем его в тексте документа
+            table_name_found_in_text = False
+            if table_name:
+                logger.info(f"🔍 Поиск названия таблицы '{table_name}' в тексте документа...")
+                try:
+                    matches = await mcp_client.find_text_in_document(filename, table_name, match_case=False)
+                    if matches:
+                        logger.info(f"   ✅ Найдено {len(matches)} упоминаний названия таблицы в тексте")
+                        table_name_found_in_text = True
+                        logger.info(f"   📍 Название найдено в тексте, ограничиваем поиск таблицами с target_text")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Ошибка при поиске названия таблицы в тексте: {e}")
+            
+            # Ищем текст в таблицах и удаляем строку
+            row_deleted = False
+            table_found_idx = None
+            row_found_idx = None
+            first_table_processed = False
+            
+            for table_idx, table in enumerate(doc.tables):
+                should_process_this_table = True
+                
+                # ПРИОРИТЕТ 1: Если LLM определил целевые таблицы, обрабатываем только их
+                if llm_target_table_indices is not None:
+                    if table_idx not in llm_target_table_indices:
+                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не определена LLM как целевая)")
+                        continue
+                    else:
+                        logger.info(f"   ✅ Таблица {table_idx} определена LLM как целевая")
+                
+                # ПРИОРИТЕТ 2: Если название найдено в тексте, обрабатываем только первую таблицу с target_text
+                if table_name and table_name_found_in_text and llm_target_table_indices is None:
+                    if first_table_processed:
+                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (уже обработана первая таблица с названием)")
+                        continue
+                    
+                    # Проверяем, содержит ли эта таблица target_text
+                    table_contains_target = False
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if text_to_remove in cell.text:
+                                table_contains_target = True
+                                break
+                        if table_contains_target:
+                            break
+                    
+                    if not table_contains_target:
+                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не содержит target_text '{text_to_remove}')")
+                        should_process_this_table = False
+                    else:
+                        logger.info(f"   ✅ Таблица {table_idx} содержит target_text и идет после названия в тексте")
+                
+                if not should_process_this_table:
+                    continue
+                
+                # Ищем строку с text_to_remove в первой ячейке (для таблиц сокращений)
+                for row_idx, row in enumerate(table.rows):
+                    if not row.cells:
+                        continue
+                    
+                    # Проверяем первую ячейку для точного совпадения (типично для таблиц сокращений)
+                    first_cell_text = row.cells[0].text.strip()
+                    if first_cell_text == text_to_remove or text_to_remove in first_cell_text:
+                        logger.info(f"   ✅ Найден текст '{text_to_remove}' в таблице {table_idx}, строка {row_idx}, ячейка 0")
+                        
+                        # Удаляем всю строку (XML элемент строки)
+                        tbl = table._tbl
+                        tr = row._tr
+                        tbl.remove(tr)
+                        
+                        row_deleted = True
+                        table_found_idx = table_idx
+                        row_found_idx = row_idx
+                        logger.info(f"   ✅ Строка {row_idx} удалена из таблицы {table_idx}")
+                        first_table_processed = True
+                        break
+                    
+                    # Если не нашли в первой ячейке, проверяем остальные ячейки
+                    for cell_idx, cell in enumerate(row.cells):
+                        cell_text = cell.text.strip()
+                        if cell_text == text_to_remove:
+                            logger.info(f"   ✅ Найден текст '{text_to_remove}' в таблице {table_idx}, строка {row_idx}, ячейка {cell_idx}")
+                            
+                            # Удаляем всю строку (XML элемент строки)
+                            tbl = table._tbl
+                            tr = row._tr
+                            tbl.remove(tr)
+                            
+                            row_deleted = True
+                            table_found_idx = table_idx
+                            row_found_idx = row_idx
+                            logger.info(f"   ✅ Строка {row_idx} удалена из таблицы {table_idx}")
+                            first_table_processed = True
+                            break
+                    
+                    if row_deleted:
+                        break
+                
+                if row_deleted:
+                    # Если название найдено в тексте, останавливаемся после первой найденной таблицы
+                    if table_name_found_in_text:
+                        logger.info(f"   ✅ Найдена целевая таблица с названием в тексте, завершаем обработку")
+                        break
+                    break
+            
+            # Если строка удалена из таблицы
+            if row_deleted:
+                doc.save(filename)
+                
+                # Добавляем аннотацию перед таблицей
+                table_para_idx = self._find_paragraph_for_table(doc, table_found_idx)
+                if change.get("annotation", True) and table_para_idx >= 0:
+                    await self._add_annotation(
+                        filename,
+                        table_para_idx,
+                        change,
+                        extra=f"Удалена строка с '{text_to_remove}' из таблицы",
+                    )
+                
+                return {
+                    "success": True,
+                    "paragraph_index": table_para_idx if table_para_idx >= 0 else 0,
+                    "table_location": {
+                        "table_idx": table_found_idx,
+                        "row_idx": row_found_idx,
+                        "paragraph_index": table_para_idx if table_para_idx >= 0 else 0
+                    },
+                    "message": f"Строка с '{text_to_remove}' удалена из таблицы"
+                }
+        
+        # ПРИОРИТЕТ 3: Если пункт не найден в таблице или это не номер пункта, ищем в параграфах
         # Нормализация текста для поиска
         normalized_text = " ".join(text_to_remove.split())
         logger.debug(f"Поиск текста для удаления: '{normalized_text}' (оригинал: '{text_to_remove}')")
@@ -5716,8 +7117,7 @@ class DocumentChangeAgent:
             }
 
         paragraph_index = matches[0].paragraph_index
-        doc = Document(filename)
-
+        
         if paragraph_index >= len(doc.paragraphs):
             return {
                 "success": False,
@@ -5725,6 +7125,59 @@ class DocumentChangeAgent:
                 "message": f"Неверный индекс параграфа: {paragraph_index}",
             }
 
+        # Если это номер пункта, удаляем только содержимое, сохраняя номер
+        if paragraph_num:
+            para = doc.paragraphs[paragraph_index]
+            para_text = para.text.strip()
+            
+            # Проверяем, что параграф начинается с номера пункта
+            patterns = [
+                rf"^{re.escape(paragraph_num)}\.",
+                rf"^{re.escape(paragraph_num)}\)",
+                rf"^{re.escape(paragraph_num)}:",
+            ]
+            
+            if any(re.match(p, para_text) for p in patterns):
+                # Находим номер пункта
+                num_pattern = None
+                for pattern in patterns:
+                    match = re.match(pattern, para_text)
+                    if match:
+                        num_pattern = match.group(0)
+                        break
+                
+                if not num_pattern:
+                    num_pattern = f"{paragraph_num}."
+                
+                # Очищаем параграф и оставляем только номер
+                for run in para.runs:
+                    run.text = ""
+                para.add_run(num_pattern)
+                
+                # Ищем и удаляем последующие параграфы, которые являются частью этого пункта
+                end_idx = self._find_section_end(doc, paragraph_index)
+                removed_preview = [para_text]
+                
+                for idx in range(paragraph_index + 1, end_idx):
+                    if idx < len(doc.paragraphs):
+                        next_para = doc.paragraphs[paragraph_index + 1]  # Индекс меняется после удаления
+                        removed_preview.append(next_para.text)
+                        DocumentChangeAgent._delete_paragraph(next_para)
+                
+                doc.save(filename)
+                
+                if change.get("annotation", True) and paragraph_index > 0:
+                    preview_text = " ".join(removed_preview)[:120]
+                    await self._add_annotation(
+                        filename,
+                        paragraph_index - 1,
+                        change,
+                        extra=f"Удалено содержимое пункта {paragraph_num} (номер сохранен): {preview_text}",
+                    )
+                
+                return {"success": True, "paragraph_index": paragraph_index}
+        
+        # Стандартное удаление параграфа (если это не номер пункта)
         start = paragraph_index
         end = self._find_section_end(doc, paragraph_index)
         removed_preview = []
@@ -5732,7 +7185,7 @@ class DocumentChangeAgent:
         for idx in range(start, end):
             para = doc.paragraphs[start]  # список пересчитывается после удаления
             removed_preview.append(para.text)
-            self._delete_paragraph(para)
+            DocumentChangeAgent._delete_paragraph(para)
 
         doc.save(filename)
 
@@ -6041,17 +7494,20 @@ class DocumentChangeAgent:
                                 table_idx = sum(1 for j in range(i) if doc.element.body[j].tag.endswith('tbl'))
                                 if table_idx == table_num:
                                     table_found = True
-                                    # Ищем последний параграф перед этой таблицей
-                                    for j in range(i-1, -1, -1):
+                                    # Ищем первый параграф ПОСЛЕ этой таблицы
+                                    for j in range(i+1, len(doc.element.body)):
                                         if doc.element.body[j].tag.endswith('p'):
                                             # Подсчитываем индекс параграфа
                                             target_paragraph_index = sum(1 for k in range(j+1) if doc.element.body[k].tag.endswith('p')) - 1
                                             break
+                                    # Если не нашли параграф после таблицы, используем последний параграф в документе
+                                    if target_paragraph_index == -1:
+                                        target_paragraph_index = sum(1 for k in range(len(doc.element.body)) if doc.element.body[k].tag.endswith('p')) - 1
                                     break
                         
                         if table_found and target_paragraph_index >= 0:
                             paragraph_index = target_paragraph_index
-                            logger.info(f"ADD_COMMENT: найден параграф {paragraph_index} ПЕРЕД таблицей {table_num}")
+                            logger.info(f"ADD_COMMENT: найден параграф {paragraph_index} ПОСЛЕ таблицы {table_num}")
                         else:
                             # Если не нашли параграф перед таблицей, ищем ближайший параграф с текстом
                             for idx, para in enumerate(doc.paragraphs):
