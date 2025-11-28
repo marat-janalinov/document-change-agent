@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from generate_test_files import generate_test_files
 from mcp_client import mcp_client
 from parlant_agent import document_agent
+from translation_service import translation_service
 
 # Загрузка переменных окружения из .env файла
 # Ищем .env файл в корне проекта (на уровень выше backend/)
@@ -1231,6 +1232,139 @@ async def get_operation_logs(
         "offset": offset,
         "logs": [log.to_dict() for log in logs]
     }
+
+
+# Перевод документов
+@app.post("/api/translate-document")
+async def translate_document(
+    file: UploadFile = File(...),
+    source_language: str = Form(...),
+    target_language: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user)
+):
+    """
+    Перевод Word документа между русским и казахским языками.
+    """
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Требуется аутентификация")
+    
+    # Проверяем поддерживаемые языки
+    supported_languages = translation_service.get_supported_languages()
+    if source_language not in supported_languages or target_language not in supported_languages:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Поддерживаемые языки: {', '.join(supported_languages.keys())}"
+        )
+    
+    if source_language == target_language:
+        raise HTTPException(status_code=400, detail="Исходный и целевой языки должны отличаться")
+    
+    # Проверяем тип файла
+    if not file.filename or not file.filename.endswith('.docx'):
+        raise HTTPException(status_code=400, detail="Поддерживаются только файлы .docx")
+    
+    try:
+        # Создаем директории для переводов
+        translations_dir = os.path.join(DATA_DIR, "translations")
+        os.makedirs(translations_dir, exist_ok=True)
+        
+        # Генерируем уникальные имена файлов
+        file_id = str(uuid.uuid4())
+        input_filename = f"input_{file_id}_{file.filename}"
+        output_filename = f"translated_{source_language}_{target_language}_{file_id}_{file.filename}"
+        
+        input_path = os.path.join(translations_dir, input_filename)
+        output_path = os.path.join(translations_dir, output_filename)
+        
+        # Сохраняем загруженный файл
+        with open(input_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        logger.info(f"Начинаем перевод документа {file.filename} с {source_language} на {target_language}")
+        
+        # Выполняем перевод
+        result = await translation_service.translate_document(
+            input_file=input_path,
+            output_file=output_path,
+            source_lang=source_language,
+            target_lang=target_language
+        )
+        
+        # Удаляем исходный файл
+        os.remove(input_path)
+        
+        logger.info(f"Перевод завершен: {result}")
+        
+        return {
+            "success": True,
+            "translatedFile": output_filename,
+            "originalFilename": file.filename,
+            "sourceLanguage": source_language,
+            "targetLanguage": target_language,
+            "statistics": {
+                "translatedParagraphs": result.get("translated_paragraphs", 0),
+                "translatedTables": result.get("translated_tables", 0),
+                "totalCharacters": result.get("total_characters", 0)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при переводе документа: {e}", exc_info=True)
+        
+        # Очищаем временные файлы в случае ошибки
+        for temp_file in [input_path, output_path]:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+        
+        raise HTTPException(status_code=500, detail=f"Ошибка перевода: {str(e)}")
+
+
+@app.get("/api/download-translated/{filename}")
+async def download_translated_file(
+    filename: str,
+    current_user: Optional[User] = Depends(get_current_user)
+):
+    """
+    Скачивание переведенного файла.
+    """
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Требуется аутентификация")
+    
+    # Проверяем безопасность имени файла
+    if not re.match(r'^translated_[a-z]{2}_[a-z]{2}_[a-f0-9-]+_.+\.docx$', filename):
+        raise HTTPException(status_code=400, detail="Недопустимое имя файла")
+    
+    translations_dir = os.path.join(DATA_DIR, "translations")
+    file_path = os.path.join(translations_dir, filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    
+    # Извлекаем оригинальное имя файла из имени переведенного файла
+    # Формат: translated_{source}_{target}_{uuid}_{original_name}.docx
+    parts = filename.split('_', 4)
+    if len(parts) >= 5:
+        original_name = parts[4]
+    else:
+        original_name = filename
+    
+    return FileResponse(
+        path=file_path,
+        filename=f"translated_{original_name}",
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+
+@app.get("/api/translation/languages")
+async def get_supported_languages():
+    """
+    Получение списка поддерживаемых языков для перевода.
+    """
+    return translation_service.get_supported_languages()
 
 
 if __name__ == "__main__":

@@ -204,11 +204,12 @@ class MCPClient:
             "find_text": old_text,
             "replace_text": new_text,
         }
-        if paragraph_index is not None:
+        # Не передаем paragraph_index для таблиц (paragraph_index = -1) или если он None
+        if paragraph_index is not None and paragraph_index >= 0:
             arguments["paragraph_index"] = paragraph_index
 
         # Сначала пробуем стандартную замену через MCP
-        result = await self._call_tool("replace_text", arguments)
+        result = await self._call_tool("search_and_replace", arguments)
         
         # Если стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц
         if not self._message_is_successful(result.text):
@@ -232,14 +233,13 @@ class MCPClient:
         style: Optional[str] = None,
     ) -> bool:
         if position is None:
-            result = await self._call_tool(
-                "add_paragraph",
-                {
-                    "filename": filename,
-                    "text": text,
-                    "style": style,
-                },
-            )
+            arguments = {
+                "filename": filename,
+                "text": text,
+            }
+            if style is not None:
+                arguments["style"] = style
+            result = await self._call_tool("add_paragraph", arguments)
             return self._message_is_successful(result.text)
 
         self._ensure_document_exists(filename)
@@ -398,23 +398,26 @@ class MCPClient:
 
         # Обработка специальных случаев для индексов
         if paragraph_index < 0:
-            # Для отрицательных индексов (таблицы) добавляем комментарий после первой таблицы
+            # Для отрицательных индексов (таблицы) добавляем комментарий ПЕРЕД первой таблицей
             target_paragraph = None
             for element in document.element.body:
                 if element.tag.endswith('tbl'):  # Это таблица
-                    # Ищем следующий параграф после таблицы
-                    next_element = element.getnext()
-                    if next_element is not None and next_element.tag.endswith('p'):
+                    # Ищем предыдущий параграф перед таблицей
+                    prev_element = element.getprevious()
+                    if prev_element is not None and prev_element.tag.endswith('p'):
                         # Находим индекс этого параграфа
                         for i, para in enumerate(document.paragraphs):
-                            if para._element == next_element:
+                            if para._element == prev_element:
                                 target_paragraph = para
                                 break
                     break
             
             if target_paragraph is None:
-                # Если не нашли подходящий параграф, добавляем в конец
-                target_paragraph = document.add_paragraph()
+                # Если не нашли подходящий параграф, добавляем в начало
+                if len(document.paragraphs) > 0:
+                    target_paragraph = document.paragraphs[0]
+                else:
+                    target_paragraph = document.add_paragraph()
             
             paragraph = target_paragraph
         elif paragraph_index >= len(document.paragraphs):
@@ -424,7 +427,7 @@ class MCPClient:
             paragraph = document.paragraphs[paragraph_index]
 
         new_paragraph = self._insert_paragraph_xml(
-            paragraph, f"[ANNOTATION by {author}] {comment_text}"
+            paragraph, comment_text  # Используем текст аннотации как есть, без дополнительных префиксов
         )
         
         # Безопасная установка стиля с проверкой наличия
@@ -505,55 +508,6 @@ class MCPClient:
                     logger.warning(f"Не удалось установить стиль '{style}' и альтернативы для параграфа в документе {filename}")
 
         document.save(filename)
-
-    def _replace_text_locally_with_tables(
-        self,
-        filename: str,
-        old_text: str,
-        new_text: str,
-        paragraph_index: Optional[int] = None,
-    ) -> bool:
-        """
-        Локальная замена текста с поддержкой таблиц через python-docx
-        """
-        try:
-            from docx import Document
-            
-            doc = Document(filename)
-            replacements_made = 0
-            
-            # Замена в обычных параграфах
-            for paragraph in doc.paragraphs:
-                if old_text in paragraph.text:
-                    # Заменяем текст в параграфе
-                    for run in paragraph.runs:
-                        if old_text in run.text:
-                            run.text = run.text.replace(old_text, new_text)
-                            replacements_made += 1
-            
-            # Замена в таблицах
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        if old_text in cell.text:
-                            # Заменяем текст в ячейке таблицы
-                            for paragraph in cell.paragraphs:
-                                for run in paragraph.runs:
-                                    if old_text in run.text:
-                                        run.text = run.text.replace(old_text, new_text)
-                                        replacements_made += 1
-            
-            if replacements_made > 0:
-                doc.save(filename)
-                logger.info(f"Локальная замена выполнена: {replacements_made} замен текста '{old_text}' на '{new_text}'")
-                return True
-            else:
-                logger.warning(f"Текст '{old_text}' не найден в документе для замены")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Ошибка при локальной замене текста: {e}")
-            return False
 
     def _replace_text_locally_with_tables(
         self,

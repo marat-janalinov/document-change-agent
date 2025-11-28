@@ -12,6 +12,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# Исключение для react/src/lib (нужна для проекта)
+!react/src/lib/
 parts/
 sdist/
 var/

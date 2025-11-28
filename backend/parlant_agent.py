@@ -156,6 +156,8 @@ class DocumentChangeAgent:
         self.model_name: str = os.environ.get("OPENAI_MODEL", "gpt-4o")
         logger.info(f"Инициализация LLM агента с моделью: {self.model_name}")
         self._patch_openai_httpx()
+        # Сохранение исходного текста инструкций для исправления target.text
+        self._original_instructions_text: Optional[str] = None
 
     async def initialize(self) -> None:
         """
@@ -203,6 +205,2443 @@ class DocumentChangeAgent:
 
         logger.info("LLM агент инициализирован")
 
+    def _get_mcp_tools_description(self) -> str:
+        """
+        Возвращает полное описание доступных MCP инструментов для LLM.
+        """
+        return """
+## ПОЛНЫЙ СПИСОК MCP ИНСТРУМЕНТОВ ДЛЯ РАБОТЫ С ДОКУМЕНТАМИ:
+
+### ОСНОВНЫЕ ИНСТРУМЕНТЫ ЧТЕНИЯ:
+
+#### 1. get_document_text - ЧТЕНИЕ ПОЛНОГО ТЕКСТА
+- **Назначение**: Получение всего содержимого документа
+- **Параметры**: filename (string)
+- **Возвращает**: Полный текст документа в виде строки
+- **Применение**: Анализ структуры и содержимого, поиск информации
+- **Пример**: get_document_text("document.docx")
+
+#### 2. get_document_outline - ПОЛУЧЕНИЕ СТРУКТУРЫ
+- **Назначение**: Анализ иерархической структуры документа
+- **Параметры**: filename (string)
+- **Возвращает**: JSON со структурой заголовков и разделов
+- **Применение**: Навигация по разделам, анализ структуры
+- **Пример**: get_document_outline("document.docx")
+
+#### 3. get_paragraph_text - ЧТЕНИЕ КОНКРЕТНОГО ПАРАГРАФА
+- **Назначение**: Получение текста определенного параграфа по индексу
+- **Параметры**: filename (string), paragraph_index (integer)
+- **Возвращает**: Текст указанного параграфа
+- **Применение**: Точечный анализ содержимого пунктов
+- **Пример**: get_paragraph_text("document.docx", 15)
+
+### ИНСТРУМЕНТЫ ПОИСКА:
+
+#### 4. find_text_in_document - ПОИСК ТЕКСТА С КОНТЕКСТОМ
+- **Назначение**: Поиск всех вхождений текста с информацией о местоположении
+- **Параметры**: filename (string), text_to_find (string), match_case (boolean, optional)
+- **Возвращает**: Список объектов MCPTextMatch с полями:
+  - location: местоположение (параграф, таблица, ячейка)
+  - position: позиция в тексте
+  - context: окружающий контекст
+  - paragraph_index: индекс параграфа
+- **Применение**: Локализация текста перед изменениями, анализ вхождений
+- **Пример**: find_text_in_document("document.docx", "ДРМ", false)
+
+### ИНСТРУМЕНТЫ ИЗМЕНЕНИЯ ТЕКСТА:
+
+#### 5. replace_text - УНИВЕРСАЛЬНАЯ ЗАМЕНА ТЕКСТА
+- **Назначение**: Поиск и замена текста во всем документе
+- **Параметры**: filename (string), old_text (string), new_text (string), match_case (boolean, optional)
+- **Возвращает**: Результат операции с количеством замен
+- **Применение**: 
+  - Замена аббревиатур в таблицах с интеллектуальным распределением по столбцам
+  - Замена фраз в пунктах с сохранением номеров пунктов
+  - Массовые замены по всему документу
+- **Особенности**: 
+  - Автоматически определяет контекст (таблица/параграф)
+  - Интеллектуально распределяет изменения по столбцам таблиц
+  - Сохраняет форматирование
+- **Пример**: replace_text("document.docx", "ДРМ", "ДКР Департамент кредитных рисков", false)
+
+### ИНСТРУМЕНТЫ УПРАВЛЕНИЯ ПАРАГРАФАМИ:
+
+#### 6. delete_paragraph - УДАЛЕНИЕ ПАРАГРАФА
+- **Назначение**: Полное удаление параграфа по индексу
+- **Параметры**: filename (string), paragraph_index (integer)
+- **Возвращает**: Результат операции
+- **Применение**: Удаление целых пунктов, разделов, устаревшей информации
+- **Пример**: delete_paragraph("document.docx", 25)
+
+#### 7. add_paragraph - ДОБАВЛЕНИЕ НОВОГО ПАРАГРАФА
+- **Назначение**: Вставка нового параграфа в указанную позицию
+- **Параметры**: filename (string), text (string), position (integer, optional)
+- **Возвращает**: Результат операции с индексом нового параграфа
+- **Применение**: Добавление новых пунктов, дополнительной информации
+- **Пример**: add_paragraph("document.docx", "Новый пункт документа", 10)
+
+#### 8. add_heading - ДОБАВЛЕНИЕ ЗАГОЛОВКА
+- **Назначение**: Вставка заголовка определенного уровня
+- **Параметры**: filename (string), text (string), level (integer), position (integer, optional)
+- **Возвращает**: Результат операции
+- **Применение**: Создание новых разделов, подразделов, структурирование
+- **Пример**: add_heading("document.docx", "Новый раздел", 2, 15)
+
+### ИНСТРУМЕНТЫ РАБОТЫ С ТАБЛИЦАМИ:
+
+#### 9. add_table - СОЗДАНИЕ ТАБЛИЦЫ
+- **Назначение**: Создание новой таблицы с заголовками и данными
+- **Параметры**: filename (string), headers (array), rows (array of arrays), position (integer, optional)
+- **Возвращает**: Результат операции с информацией о созданной таблице
+- **Применение**: Вставка структурированных данных, создание справочников
+- **Пример**: add_table("document.docx", ["Аббревиатура", "Описание"], [["ДКР", "Департамент кредитных рисков"]], 20)
+
+### ИНСТРУМЕНТЫ АННОТИРОВАНИЯ:
+
+#### 10. add_comment - ДОБАВЛЕНИЕ КОММЕНТАРИЯ/АННОТАЦИИ
+- **Назначение**: Вставка комментария или аннотации в документ
+- **Параметры**: filename (string), text (string), position (integer, optional)
+- **Возвращает**: Результат операции
+- **Применение**: Пометки об изменениях, аннотации, примечания
+- **Пример**: add_comment("document.docx", "Изменено согласно новым требованиям", 30)
+
+### СЛУЖЕБНЫЕ ИНСТРУМЕНТЫ:
+
+#### 11. copy_document - КОПИРОВАНИЕ ДОКУМЕНТА
+- **Назначение**: Создание точной копии документа
+- **Параметры**: source_filename (string), target_filename (string)
+- **Возвращает**: Результат операции
+- **Применение**: Создание резервных копий, версионирование
+- **Пример**: copy_document("document.docx", "document_backup.docx")
+
+## ПРАВИЛА ВЫБОРА ОПЕРАЦИЙ И ГЕНЕРАЦИИ JSON:
+
+### ОБЯЗАТЕЛЬНЫЕ ПОЛЯ JSON:
+```json
+{
+  "change_id": "CHG-001",
+  "operation": "REPLACE_TEXT",
+  "description": "Описание изменения",
+  "target": {
+    "text": "точный текст для поиска"
+  },
+  "payload": {
+    "new_text": "новый текст для замены"
+  }
+}
+```
+
+### ПРАВИЛА ДЛЯ REPLACE_TEXT:
+
+#### Для таблиц:
+- **Инструкция**: "В таблице «Принятые сокращения» строку «ДРМ» изложить в редакции «ДКР Департамент кредитных рисков»"
+- **target.text**: "ДРМ" (только аббревиатура для поиска)
+- **payload.new_text**: "ДКР Департамент кредитных рисков" (полный новый текст)
+- **Система автоматически**: распределит "ДКР" в первый столбец, "Департамент кредитных рисков" во второй
+
+#### Для пунктов:
+- **Инструкция**: "В пункте 32 слова «согласовывается с ДО и ДРМ» изложить в редакции «согласовывается с ДО»"
+- **target.text**: "согласовывается с ДО и ДРМ" (точная фраза для замены)
+- **payload.new_text**: "согласовывается с ДО" (новая фраза)
+- **Система автоматически**: найдет пункт 32 и заменит только указанную фразу, не трогая номер
+
+#### Для массовых замен:
+- **Инструкция**: "По всему тексту заменить «ДРМ» на «ДКР»"
+- **target.text**: "ДРМ"
+- **payload.new_text**: "ДКР"
+- **target.replace_all**: true
+
+### КРИТИЧЕСКИ ВАЖНО:
+1. **target.text** должен содержать ТОЧНЫЙ текст для поиска, БЕЗ кавычек
+2. **payload.new_text** должен содержать ПОЛНЫЙ новый текст
+3. НЕ используйте номера пунктов в target.text для замен внутри пунктов
+4. Для таблиц указывайте только искомую аббревиатуру в target.text
+5. Система автоматически определит контекст и применит интеллектуальную логику
+"""
+
+    async def _analyze_instruction_context(self, instruction_text: str, source_file: str) -> Dict[str, Any]:
+        """
+        Анализирует контекст инструкции: определяет тип элемента (параграф/таблица/ячейка)
+        и рекомендует подходящий MCP инструмент.
+        """
+        logger.info(f"🔍 АНАЛИЗ КОНТЕКСТА: {instruction_text[:100]}...")
+        
+        context_analysis = {
+            "instruction": instruction_text,
+            "element_type": "unknown",  # paragraph, table, table_cell, document
+            "recommended_tool": "replace_text",
+            "reasoning": "",
+            "target_location": None
+        }
+        
+        # Анализируем ключевые слова для определения типа элемента
+        instruction_lower = instruction_text.lower()
+        
+        # 1. Определяем тип элемента
+        if "в таблице" in instruction_lower or "строку" in instruction_lower:
+            context_analysis["element_type"] = "table_cell"
+            context_analysis["reasoning"] = "Упоминается таблица или строка таблицы"
+            
+        elif any(word in instruction_lower for word in ["пункт", "пункте", "п.", "подпункт"]):
+            context_analysis["element_type"] = "paragraph"
+            context_analysis["reasoning"] = "Упоминается пункт или параграф"
+            
+        elif "по всему тексту" in instruction_lower:
+            context_analysis["element_type"] = "document"
+            context_analysis["reasoning"] = "Массовая замена по всему документу"
+            
+        # 2. Определяем рекомендуемый инструмент
+        if any(word in instruction_lower for word in ["заменить", "изложить", "изменить"]):
+            context_analysis["recommended_tool"] = "replace_text"
+            
+        elif any(word in instruction_lower for word in ["исключить", "удалить"]):
+            context_analysis["recommended_tool"] = "delete_paragraph"
+            
+        elif any(word in instruction_lower for word in ["добавить", "вставить", "дополнить"]):
+            if "таблиц" in instruction_lower:
+                context_analysis["recommended_tool"] = "add_table"
+            elif "заголов" in instruction_lower:
+                context_analysis["recommended_tool"] = "add_heading"
+            else:
+                context_analysis["recommended_tool"] = "add_paragraph"
+        
+        # 3. Пытаемся найти целевой элемент в документе
+        try:
+            if context_analysis["element_type"] in ["table_cell", "paragraph"]:
+                # Ищем упоминаемый текст в документе
+                search_terms = []
+                
+                # Извлекаем потенциальные поисковые термины из инструкции
+                import re
+                quoted_text = re.findall(r'[«"](.*?)[»"]', instruction_text)
+                if quoted_text:
+                    search_terms.extend(quoted_text)
+                
+                # Ищем номера пунктов
+                point_numbers = re.findall(r'пункт[е]?\s+(\d+)', instruction_lower)
+                if point_numbers:
+                    search_terms.extend([f"{num}." for num in point_numbers])
+                
+                if search_terms:
+                    # Используем MCP для поиска
+                    for term in search_terms[:2]:  # Ограничиваем поиск первыми двумя терминами
+                        try:
+                            matches = await mcp_client.find_text_in_document(source_file, term)
+                            if matches:
+                                context_analysis["target_location"] = {
+                                    "search_term": term,
+                                    "matches": len(matches),
+                                    "first_match": matches[0] if matches else None
+                                }
+                                break
+                        except Exception as e:
+                            logger.debug(f"Ошибка поиска '{term}': {e}")
+                            
+        except Exception as e:
+            logger.debug(f"Ошибка анализа целевого элемента: {e}")
+        
+        logger.info(f"📋 РЕЗУЛЬТАТ АНАЛИЗА: {context_analysis['element_type']} → {context_analysis['recommended_tool']}")
+        return context_analysis
+
+    async def _analyze_table_structure(self, source_file: str, target_text: str) -> Dict[str, Any]:
+        """
+        Анализирует структуру таблицы для правильного определения содержимого ячеек.
+        """
+        logger.info(f"🔍 АНАЛИЗ СТРУКТУРЫ ТАБЛИЦЫ для текста: {target_text}")
+        
+        table_analysis = {
+            "found": False,
+            "table_index": -1,
+            "row_index": -1,
+            "cell_index": -1,
+            "full_cell_content": "",
+            "recommended_target_text": target_text,
+            "table_context": ""
+        }
+        
+        try:
+            # Используем MCP для поиска текста в документе
+            matches = await mcp_client.find_text_in_document(source_file, target_text)
+            
+            if matches:
+                for match in matches:
+                    # Правильный доступ к атрибутам MCPTextMatch
+                    if hasattr(match, 'location'):
+                        location = match.location
+                        context = match.context if hasattr(match, 'context') else ''
+                    else:
+                        # Для словарей используем .get()
+                        location = match.get('location', '') if isinstance(match, dict) else ''
+                        context = match.get('context', '') if isinstance(match, dict) else ''
+                    
+                    # Проверяем, находится ли текст в таблице
+                    if 'Table' in location:
+                        # Парсим информацию о местоположении
+                        # Формат: 'Table 0, Row 3, Column 0'
+                        parts = location.split(', ')
+                        if len(parts) >= 3:
+                            table_idx = int(parts[0].split(' ')[1])
+                            row_idx = int(parts[1].split(' ')[1])
+                            col_idx = int(parts[2].split(' ')[1])
+                            
+                            table_analysis.update({
+                                "found": True,
+                                "table_index": table_idx,
+                                "row_index": row_idx,
+                                "cell_index": col_idx,
+                                "full_cell_content": context,
+                                "table_context": f"Таблица {table_idx}, строка {row_idx}, ячейка {col_idx}"
+                            })
+                            
+                            # Если контекст содержит больше информации, чем искомый текст,
+                            # используем полный контекст как target_text
+                            if len(context.strip()) > len(target_text.strip()) and target_text in context:
+                                table_analysis["recommended_target_text"] = context.strip()
+                                logger.info(f"📋 НАЙДЕНО ПОЛНОЕ СОДЕРЖИМОЕ ЯЧЕЙКИ: '{context.strip()}'")
+                            
+                            break
+                            
+            if not table_analysis["found"]:
+                logger.warning(f"⚠️ Текст '{target_text}' не найден в таблицах")
+            else:
+                logger.info(f"✅ АНАЛИЗ ТАБЛИЦЫ ЗАВЕРШЕН: {table_analysis['table_context']}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка анализа структуры таблицы: {e}")
+        
+        return table_analysis
+
+    async def _intelligent_table_analysis(self, source_file: str, instruction_text: str) -> Dict[str, Any]:
+        """
+        Динамический интеллектуальный анализ структуры таблицы.
+        Определяет количество столбцов, их назначение и необходимые операции.
+        Читает несколько строк таблицы для понимания структуры и содержания.
+        """
+        logger.info(f"🧠 ДИНАМИЧЕСКИЙ АНАЛИЗ ТАБЛИЦЫ для: {instruction_text[:50]}...")
+        
+        analysis = {
+            "is_table_change": False,
+            "table_structure": {
+                "columns_count": 0,
+                "column_types": [],
+                "column_content": [],
+                "sample_rows": []  # Добавляем образцы строк для анализа
+            },
+            "instruction_mapping": {
+                "target_key": "",
+                "new_values": [],
+                "affected_columns": []
+            },
+            "recommended_operations": []
+        }
+        
+        # Проверяем, касается ли инструкция таблицы
+        if not ("таблице" in instruction_text.lower() and "строку" in instruction_text.lower()):
+            return analysis
+        
+        analysis["is_table_change"] = True
+        
+        try:
+            import re
+            
+            # Правильно извлекаем целевой текст из инструкции
+            instruction_data = self._extract_target_and_new_text(instruction_text)
+            
+            if not instruction_data["target_text"]:
+                logger.warning("Не удалось извлечь целевой текст из инструкции")
+                return analysis
+                
+            target_key = instruction_data["target_text"]
+            analysis["instruction_mapping"]["target_key"] = target_key
+            analysis["instruction_mapping"]["instruction_type"] = instruction_data["instruction_type"]
+            logger.info(f"🎯 Целевой текст для поиска: '{target_key}'")
+            
+            # Ищем строку в таблице
+            matches = await mcp_client.find_text_in_document(source_file, target_key)
+            
+            if not matches:
+                logger.warning(f"Строка с ключом '{target_key}' не найдена")
+                return analysis
+            
+            # Анализируем первое совпадение в таблице
+            for match in matches:
+                # Исправляем ошибку: match может быть объектом, а не словарем
+                if hasattr(match, 'location'):
+                    location = match.location
+                    context = match.context if hasattr(match, 'context') else ''
+                else:
+                    # Правильный доступ к атрибутам MCPTextMatch
+                    if hasattr(match, 'location'):
+                        location = match.location
+                        context = match.context if hasattr(match, 'context') else ''
+                    else:
+                        # Для словарей используем .get()
+                        location = match.get('location', '') if isinstance(match, dict) else ''
+                        context = match.get('context', '') if isinstance(match, dict) else ''
+                    
+                if 'Table' in location:
+                    logger.info(f"📍 Найдена строка в: {location}")
+                    
+                    # ДИНАМИЧЕСКИЙ АНАЛИЗ СТРУКТУРЫ СТРОКИ
+                    # Здесь нужно получить всю строку и проанализировать ее столбцы
+                    context = context
+                    
+                    # Парсим местоположение для получения координат
+                    parts = location.split(', ')
+                    if len(parts) >= 3:
+                        table_idx = int(parts[0].split(' ')[1])
+                        row_idx = int(parts[1].split(' ')[1])
+                        
+                        # Получаем структуру всей строки (это требует дополнительного MCP запроса)
+                        row_structure = await self._analyze_table_row_structure(source_file, table_idx, row_idx)
+                        
+                        analysis["table_structure"] = row_structure
+                        
+                        # Извлекаем новые значения из инструкции
+                        instruction_data = self._extract_target_and_new_text(instruction_text)
+                        new_values = [instruction_data["new_text"]] if instruction_data["new_text"] else []
+                        analysis["instruction_mapping"]["new_values"] = new_values
+                        
+                        # Сопоставляем новые значения со столбцами
+                        affected_columns = self._map_values_to_columns(row_structure, new_values, target_key)
+                        analysis["instruction_mapping"]["affected_columns"] = affected_columns
+                        
+                        # Создаем рекомендуемые операции
+                        operations = self._create_adaptive_operations(row_structure, affected_columns, new_values)
+                        analysis["recommended_operations"] = operations
+                        
+                        logger.info(f"📊 СТРУКТУРА: {row_structure['columns_count']} столбцов")
+                        logger.info(f"🎯 ЗАТРОНУТЫЕ СТОЛБЦЫ: {affected_columns}")
+                        logger.info(f"🔧 ОПЕРАЦИЙ: {len(operations)}")
+                        
+                        break
+                        
+        except Exception as e:
+            logger.error(f"Ошибка динамического анализа таблицы: {e}")
+        
+        return analysis
+
+    async def _analyze_table_row_structure(self, source_file: str, table_idx: int, row_idx: int) -> Dict[str, Any]:
+        """
+        Интеллектуальный анализ структуры конкретной строки таблицы.
+        Читает несколько строк таблицы для понимания структуры и содержания.
+        """
+        logger.info(f"📊 ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ строки {row_idx} в таблице {table_idx}")
+        
+        structure = {
+            "columns_count": 2,  # По умолчанию 2 столбца
+            "column_types": ["key", "value"],
+            "column_content": [],
+            "sample_rows": [],
+            "analysis_method": "default"
+        }
+        
+        try:
+            # Получаем текст документа для анализа
+            doc_text = await mcp_client.get_document_text(source_file)
+            
+            # Читаем несколько строк таблицы для анализа структуры
+            sample_rows = await self._read_table_sample_rows(source_file, doc_text, table_idx)
+            structure["sample_rows"] = sample_rows
+            
+            if sample_rows:
+                # Анализируем структуру на основе реальных данных
+                analyzed_structure = self._analyze_real_table_structure(sample_rows)
+                structure.update(analyzed_structure)
+                structure["analysis_method"] = "real_data_analysis"
+                logger.info(f"✅ Анализ реальных данных: {structure['columns_count']} столбцов, типы: {structure['column_types']}")
+            else:
+                # Используем эвристический анализ
+                structure = self._heuristic_table_analysis()
+                structure["analysis_method"] = "heuristic"
+                logger.info(f"⚠️ Используется эвристический анализ: {structure['columns_count']} столбцов")
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа структуры строки: {e}")
+            # Возвращаем безопасные значения по умолчанию
+            structure = {
+                "columns_count": 2,
+                "column_types": ["key", "value"],
+                "column_content": [],
+                "sample_rows": [],
+                "analysis_method": "error_fallback"
+            }
+        
+        return structure
+    
+    async def _read_table_sample_rows(self, source_file: str, doc_text: str, table_idx: int, max_rows: int = 3) -> List[Dict[str, Any]]:
+        """
+        Читает несколько строк таблицы для анализа структуры.
+        
+        Args:
+            source_file: Путь к файлу
+            doc_text: Текст документа
+            table_idx: Индекс таблицы
+            max_rows: Максимальное количество строк для чтения
+            
+        Returns:
+            Список строк с их содержимым
+        """
+        sample_rows = []
+        
+        try:
+            # Ищем таблицы в тексте по характерным паттернам
+            import re
+            
+            # Паттерны для поиска таблиц
+            table_patterns = [
+                r'(\w+)\s+([^\n\r]+)',  # Простой паттерн: слово + описание
+                r'([А-ЯЁ]{2,5})\s+([^\n\r]+)',  # Аббревиатура + описание
+                r'(\d+\.?\d*)\s+([^\n\r]+)',  # Номер + описание
+            ]
+            
+            lines = doc_text.split('\n')
+            table_found = False
+            rows_collected = 0
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Ищем начало таблицы по ключевым словам
+                if any(keyword in line.lower() for keyword in ['таблица', 'сокращения', 'пояснения', 'обозначения']):
+                    table_found = True
+                    continue
+                
+                if table_found and rows_collected < max_rows:
+                    # Пытаемся разобрать строку таблицы
+                    for pattern in table_patterns:
+                        match = re.match(pattern, line)
+                        if match:
+                            row_data = {
+                                "row_index": rows_collected,
+                                "raw_text": line,
+                                "columns": list(match.groups()),
+                                "column_count": len(match.groups())
+                            }
+                            sample_rows.append(row_data)
+                            rows_collected += 1
+                            logger.info(f"📋 Найдена строка таблицы {rows_collected}: {match.groups()}")
+                            break
+                
+                # Прекращаем поиск если собрали достаточно строк
+                if rows_collected >= max_rows:
+                    break
+                    
+                # Прекращаем поиск если встретили конец таблицы
+                if table_found and any(keyword in line.lower() for keyword in ['пункт', 'раздел', 'глава']):
+                    break
+            
+            logger.info(f"📊 Собрано {len(sample_rows)} образцов строк таблицы")
+            
+        except Exception as e:
+            logger.error(f"Ошибка чтения образцов строк таблицы: {e}")
+        
+        return sample_rows
+    
+    def _analyze_real_table_structure(self, sample_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Анализирует структуру таблицы на основе реальных данных.
+        
+        Args:
+            sample_rows: Образцы строк таблицы
+            
+        Returns:
+            Структура таблицы
+        """
+        if not sample_rows:
+            return {
+                "columns_count": 2,
+                "column_types": ["key", "value"],
+                "column_content": []
+            }
+        
+        # Определяем количество столбцов
+        columns_count = max(row["column_count"] for row in sample_rows)
+        
+        # Анализируем типы столбцов на основе содержимого
+        column_types = []
+        column_content = []
+        
+        for col_idx in range(columns_count):
+            col_samples = []
+            for row in sample_rows:
+                if col_idx < len(row["columns"]):
+                    col_samples.append(row["columns"][col_idx])
+            
+            # Определяем тип столбца
+            col_type = self._determine_column_type(col_samples)
+            column_types.append(col_type)
+            column_content.append(col_samples[:3])  # Первые 3 образца
+        
+        logger.info(f"🧠 Анализ структуры: {columns_count} столбцов, типы: {column_types}")
+        
+        return {
+            "columns_count": columns_count,
+            "column_types": column_types,
+            "column_content": column_content
+        }
+    
+    def _determine_column_type(self, samples: List[str]) -> str:
+        """
+        Определяет тип столбца на основе образцов данных.
+        
+        Args:
+            samples: Образцы данных столбца
+            
+        Returns:
+            Тип столбца
+        """
+        if not samples:
+            return "unknown"
+        
+        # Анализируем паттерны в образцах
+        import re
+        
+        # Проверяем на аббревиатуры (короткие заглавные буквы)
+        abbrev_count = sum(1 for s in samples if re.match(r'^[А-ЯЁ]{2,5}$', s.strip()))
+        if abbrev_count > len(samples) * 0.5:
+            return "abbreviation"
+        
+        # Проверяем на номера
+        number_count = sum(1 for s in samples if re.match(r'^\d+\.?\d*$', s.strip()))
+        if number_count > len(samples) * 0.5:
+            return "number"
+        
+        # Проверяем на длинные описания
+        desc_count = sum(1 for s in samples if len(s.strip()) > 10)
+        if desc_count > len(samples) * 0.5:
+            return "description"
+        
+        # По умолчанию - ключ
+        return "key"
+    
+    def _analyze_table_patterns_in_text(self, doc_text: str, table_idx: int) -> Dict[str, Any]:
+        """
+        Анализирует паттерны таблицы в тексте документа.
+        
+        Args:
+            doc_text: Полный текст документа
+            table_idx: Индекс таблицы
+            
+        Returns:
+            Результат анализа структуры таблицы
+        """
+        import re
+        
+        # Ищем признаки таблицы сокращений
+        abbreviation_patterns = [
+            r'сокращения?\s+и\s+пояснения',
+            r'принятые\s+сокращения',
+            r'список\s+сокращений',
+            r'аббревиатур[ыа]'
+        ]
+        
+        is_abbreviation_table = any(
+            re.search(pattern, doc_text, re.IGNORECASE) 
+            for pattern in abbreviation_patterns
+        )
+        
+        if is_abbreviation_table:
+            return {
+                "success": True,
+                "columns_count": 2,
+                "column_types": ["abbreviation", "description"],
+                "table_type": "abbreviations",
+                "column_content": []
+            }
+        
+        # Ищем другие паттерны таблиц
+        # Если находим много коротких слов заглавными буквами - вероятно таблица сокращений
+        uppercase_words = re.findall(r'\b[А-ЯA-Z]{2,6}\b', doc_text)
+        if len(uppercase_words) > 5:
+            return {
+                "success": True,
+                "columns_count": 2,
+                "column_types": ["abbreviation", "description"],
+                "table_type": "abbreviations_detected",
+                "column_content": []
+            }
+        
+        return {"success": False}
+    
+    def _heuristic_table_analysis(self) -> Dict[str, Any]:
+        """
+        Эвристический анализ структуры таблицы.
+        Используется когда другие методы не сработали.
+        
+        Returns:
+            Базовая структура таблицы
+        """
+        return {
+            "columns_count": 2,
+            "column_types": ["key", "value"],
+            "table_type": "general",
+            "column_content": []
+        }
+
+    def _extract_target_and_new_text(self, instruction_text: str) -> Dict[str, str]:
+        """
+        Правильно извлекает целевой текст и новый текст из инструкции.
+        """
+        import re
+        result = {
+            "target_text": "",
+            "new_text": "",
+            "instruction_type": "unknown"
+        }
+        
+        logger.info(f"🔍 АНАЛИЗ ИНСТРУКЦИИ: {instruction_text}")
+        
+        # Тип 1: "В пункте X слова Y изложить в редакции Z"
+        paragraph_match = re.search(r'пункте\s+(\d+)\s+слова\s*[«"\'](.*?)[»"\']\s+изложить.*?редакции:\s*[«"\'](.*?)[»"\']', instruction_text, re.IGNORECASE)
+        if paragraph_match:
+            paragraph_num = paragraph_match.group(1)
+            target_phrase = paragraph_match.group(2).strip()
+            new_phrase = paragraph_match.group(3).strip()
+            
+            result.update({
+                "target_text": target_phrase,  # Ищем фразу, а не номер пункта!
+                "new_text": new_phrase,
+                "instruction_type": "paragraph_phrase_replacement",
+                "paragraph_number": paragraph_num
+            })
+            
+            logger.info(f"📋 ТИП: Замена фразы в пункте {paragraph_num}")
+            logger.info(f"🎯 ЦЕЛЕВАЯ ФРАЗА: '{target_phrase}'")
+            logger.info(f"📝 НОВАЯ ФРАЗА: '{new_phrase}'")
+            return result
+        
+        # Тип 2: "В таблице строку X изложить в редакции Y"
+        table_match = re.search(r'таблице.*?строку\s*[«"\'](.*?)[»"\']\s+изложить.*?редакции:\s*[«"\'](.*?)[»"\']', instruction_text, re.IGNORECASE)
+        if table_match:
+            target_key = table_match.group(1).strip()
+            new_description = table_match.group(2).strip()
+            
+            result.update({
+                "target_text": target_key,
+                "new_text": new_description,
+                "instruction_type": "table_row_replacement"
+            })
+            
+            logger.info(f"📋 ТИП: Замена строки в таблице")
+            logger.info(f"🎯 КЛЮЧ СТРОКИ: '{target_key}'")
+            logger.info(f"📝 НОВОЕ ОПИСАНИЕ: '{new_description}'")
+            return result
+        
+        # Тип 3: "По всему тексту X заменить на Y"
+        mass_replace_match = re.search(r'всему тексту.*?[«"\'](.*?)[»"\'].*?заменить.*?[«"\'](.*?)[»"\']', instruction_text, re.IGNORECASE)
+        if mass_replace_match:
+            old_text = mass_replace_match.group(1).strip()
+            new_text = mass_replace_match.group(2).strip()
+            
+            result.update({
+                "target_text": old_text,
+                "new_text": new_text,
+                "instruction_type": "mass_replacement"
+            })
+            
+            logger.info(f"📋 ТИП: Массовая замена")
+            logger.info(f"🎯 СТАРЫЙ ТЕКСТ: '{old_text}'")
+            logger.info(f"📝 НОВЫЙ ТЕКСТ: '{new_text}'")
+            return result
+        
+        logger.warning(f"⚠️ НЕ УДАЛОСЬ РАСПОЗНАТЬ ТИП ИНСТРУКЦИИ: {instruction_text}")
+        return result
+
+    def _map_values_to_columns(self, row_structure: Dict[str, Any], new_values: List[str], target_key: str) -> List[int]:
+        """
+        Интеллектуально сопоставляет новые значения со столбцами таблицы.
+        Анализирует содержимое инструкции, структуру таблицы и образцы строк.
+        """
+        affected_columns = []
+        
+        if not new_values or not row_structure.get("columns_count", 0):
+            return affected_columns
+        
+        column_types = row_structure.get("column_types", [])
+        sample_rows = row_structure.get("sample_rows", [])
+        columns_count = row_structure.get("columns_count", 2)
+        
+        logger.info(f"🧠 ИНТЕЛЛЕКТУАЛЬНОЕ СОПОСТАВЛЕНИЕ:")
+        logger.info(f"   Столбцов: {columns_count}")
+        logger.info(f"   Типы столбцов: {column_types}")
+        logger.info(f"   Новые значения: {new_values}")
+        logger.info(f"   Целевой ключ: {target_key}")
+        
+        # Анализируем новое содержимое на основе реальной структуры
+        new_content = new_values[0] if new_values else ""
+        content_analysis = self._analyze_instruction_content(new_content, target_key, sample_rows)
+        
+        # Определяем затронутые столбцы на основе анализа содержимого
+        affected_columns = self._determine_affected_columns(content_analysis, column_types, target_key)
+        
+        logger.info(f"🎯 РЕЗУЛЬТАТ СОПОСТАВЛЕНИЯ: столбцы {affected_columns}")
+        return affected_columns
+    
+    def _analyze_instruction_content(self, new_content: str, target_key: str, sample_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Анализирует содержимое инструкции в контексте реальной структуры таблицы.
+        
+        Args:
+            new_content: Новое содержимое из инструкции
+            target_key: Ключ для поиска (например, аббревиатура)
+            sample_rows: Образцы строк таблицы
+            
+        Returns:
+            Анализ содержимого инструкции
+        """
+        analysis = {
+            "has_key_change": False,
+            "has_description_change": False,
+            "key_part": "",
+            "description_part": "",
+            "change_type": "unknown"
+        }
+        
+        try:
+            # Анализируем содержимое инструкции
+            import re
+            
+            # Ищем паттерны изменения ключа и описания
+            # Например: "ПД Проектные дирекции 1,2,3,4,5,6."
+            
+            # Проверяем, содержит ли инструкция целевой ключ
+            if target_key and target_key.upper() in new_content.upper():
+                analysis["has_key_change"] = True
+                analysis["key_part"] = target_key
+                
+                # Извлекаем описание после ключа
+                pattern = rf'{re.escape(target_key)}\s+(.+)'
+                match = re.search(pattern, new_content, re.IGNORECASE)
+                if match:
+                    analysis["description_part"] = match.group(1).strip()
+                    analysis["has_description_change"] = True
+                    analysis["change_type"] = "key_and_description"
+            else:
+                # Если ключ не найден, возможно это только изменение описания
+                analysis["description_part"] = new_content.strip()
+                analysis["has_description_change"] = True
+                analysis["change_type"] = "description_only"
+            
+            # Дополнительный анализ на основе образцов строк
+            if sample_rows:
+                # Проверяем, похоже ли новое содержимое на существующие строки
+                for row in sample_rows:
+                    if len(row["columns"]) >= 2:
+                        existing_key = row["columns"][0].strip()
+                        existing_desc = row["columns"][1].strip()
+                        
+                        # Если новое содержимое содержит существующий ключ
+                        if existing_key.upper() in new_content.upper():
+                            analysis["key_part"] = existing_key
+                            analysis["has_key_change"] = True
+                            break
+            
+            logger.info(f"📝 АНАЛИЗ СОДЕРЖИМОГО: {analysis}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа содержимого инструкции: {e}")
+        
+        return analysis
+    
+    def _determine_affected_columns(self, content_analysis: Dict[str, Any], column_types: List[str], target_key: str) -> List[int]:
+        """
+        Определяет какие столбцы должны быть изменены на основе анализа содержимого.
+        
+        Args:
+            content_analysis: Анализ содержимого инструкции
+            column_types: Типы столбцов
+            target_key: Целевой ключ
+            
+        Returns:
+            Список индексов затронутых столбцов
+        """
+        affected_columns = []
+        
+        try:
+            change_type = content_analysis.get("change_type", "unknown")
+            has_key_change = content_analysis.get("has_key_change", False)
+            has_description_change = content_analysis.get("has_description_change", False)
+            
+            # Если есть изменение ключа, затрагиваем первый столбец (обычно ключ/аббревиатура)
+            if has_key_change and len(column_types) > 0:
+                if column_types[0] in ["abbreviation", "key", "number"]:
+                    affected_columns.append(0)
+            
+            # Если есть изменение описания, затрагиваем столбец описания
+            if has_description_change:
+                # Ищем столбец с типом "description"
+                desc_col_idx = -1
+                for i, col_type in enumerate(column_types):
+                    if col_type == "description":
+                        desc_col_idx = i
+                        break
+                
+                # Если не найден столбец описания, используем последний столбец
+                if desc_col_idx == -1 and len(column_types) > 1:
+                    desc_col_idx = len(column_types) - 1
+                
+                if desc_col_idx >= 0:
+                    affected_columns.append(desc_col_idx)
+            
+            # Если ничего не определено, по умолчанию затрагиваем все столбцы
+            if not affected_columns:
+                affected_columns = list(range(len(column_types)))
+            
+            # Убираем дубликаты и сортируем
+            affected_columns = sorted(list(set(affected_columns)))
+            
+            logger.info(f"🎯 ОПРЕДЕЛЕНЫ ЗАТРОНУТЫЕ СТОЛБЦЫ: {affected_columns} для типа изменения '{change_type}'")
+            
+        except Exception as e:
+            logger.error(f"Ошибка определения затронутых столбцов: {e}")
+            # По умолчанию затрагиваем все столбцы
+            affected_columns = list(range(len(column_types))) if column_types else [0, 1]
+        
+        return affected_columns
+    
+    def _analyze_new_content(self, new_content: str, target_key: str) -> Dict[str, Any]:
+        """
+        Анализирует новое содержимое для понимания структуры.
+        
+        Args:
+            new_content: Новое содержимое из инструкции
+            target_key: Ключ для поиска
+            
+        Returns:
+            Анализ содержимого
+        """
+        import re
+        
+        # Разбиваем содержимое на части
+        parts = new_content.split()
+        
+        analysis = {
+            "has_key": False,
+            "has_description": False,
+            "key_part": "",
+            "description_part": "",
+            "is_key_change": False,
+            "is_description_change": False
+        }
+        
+        # Проверяем, начинается ли с ключа
+        if parts and parts[0].strip() == target_key.strip():
+            analysis["has_key"] = True
+            analysis["key_part"] = parts[0]
+            if len(parts) > 1:
+                analysis["has_description"] = True
+                analysis["description_part"] = " ".join(parts[1:])
+                analysis["is_description_change"] = True
+        elif parts and len(parts[0]) <= 5 and parts[0].isupper():
+            # Новый ключ (короткий и заглавными буквами)
+            analysis["has_key"] = True
+            analysis["key_part"] = parts[0]
+            analysis["is_key_change"] = True
+            if len(parts) > 1:
+                analysis["has_description"] = True
+                analysis["description_part"] = " ".join(parts[1:])
+                analysis["is_description_change"] = True
+        else:
+            # Только описание
+            analysis["has_description"] = True
+            analysis["description_part"] = new_content
+            analysis["is_description_change"] = True
+        
+        logger.info(f"📝 АНАЛИЗ СОДЕРЖИМОГО: {analysis}")
+        return analysis
+    
+    def _map_abbreviation_table_columns(self, content_analysis: Dict[str, Any], target_key: str) -> List[int]:
+        """
+        Сопоставление для таблицы сокращений.
+        
+        Args:
+            content_analysis: Анализ содержимого
+            target_key: Целевой ключ
+            
+        Returns:
+            Список столбцов для изменения
+        """
+        affected_columns = []
+        
+        # Если есть новый ключ - изменяем первый столбец
+        if content_analysis["is_key_change"] or content_analysis["has_key"]:
+            affected_columns.append(0)
+        
+        # Если есть описание - изменяем второй столбец
+        if content_analysis["is_description_change"] or content_analysis["has_description"]:
+            affected_columns.append(1)
+        
+        # Если ничего не определено, изменяем оба столбца (безопасный вариант)
+        if not affected_columns:
+            affected_columns = [0, 1]
+        
+        return affected_columns
+    
+    def _map_general_table_columns(self, content_analysis: Dict[str, Any], row_structure: Dict[str, Any]) -> List[int]:
+        """
+        Сопоставление для общих таблиц.
+        
+        Args:
+            content_analysis: Анализ содержимого
+            row_structure: Структура строки
+            
+        Returns:
+            Список столбцов для изменения
+        """
+        # Для общих таблиц изменяем все столбцы
+        return list(range(row_structure.get("columns_count", 2)))
+
+    def _should_update_key_column(self, new_value: str, current_key: str) -> bool:
+        """
+        Универсально определяет, нужно ли обновлять ключевой столбец.
+        """
+        # Если в новом значении есть новый ключ (первое слово отличается)
+        words = new_value.split()
+        if words and words[0] != current_key:
+            return True
+        return False
+
+    def _create_adaptive_operations(self, row_structure: Dict[str, Any], affected_columns: List[int], new_values: List[str]) -> List[Dict[str, Any]]:
+        """
+        Создает интеллектуальные операции для изменения таблицы с правильным распределением по столбцам.
+        """
+        operations = []
+        
+        if not new_values or not affected_columns:
+            return operations
+        
+        # Анализируем новое содержимое
+        new_content = new_values[0] if new_values else ""
+        content_parts = self._split_content_for_columns(new_content, len(affected_columns))
+        
+        logger.info(f"🔧 СОЗДАНИЕ ОПЕРАЦИЙ:")
+        logger.info(f"   Затронутые столбцы: {affected_columns}")
+        logger.info(f"   Исходное содержимое: '{new_content}'")
+        logger.info(f"   Разделенное содержимое: {content_parts}")
+        
+        for i, col_idx in enumerate(affected_columns):
+            # Определяем значение для этого столбца
+            if i < len(content_parts):
+                column_value = content_parts[i]
+            elif i == 0 and content_parts:
+                # Для первого столбца используем первую часть
+                column_value = content_parts[0].split()[0] if content_parts[0].split() else content_parts[0]
+            else:
+                # Для остальных столбцов используем оставшуюся часть
+                column_value = " ".join(content_parts[0].split()[1:]) if content_parts and content_parts[0].split() else ""
+            
+            if column_value.strip():  # Только если есть значение
+                operation = {
+                    "column_index": col_idx,
+                    "action": "replace",
+                    "new_value": column_value.strip(),
+                    "column_type": row_structure.get("column_types", [])[col_idx] if col_idx < len(row_structure.get("column_types", [])) else f"column_{col_idx}"
+                }
+                operations.append(operation)
+                logger.info(f"   ✅ Операция для столбца {col_idx}: '{column_value.strip()}'")
+        
+        return operations
+    
+    def _split_content_for_columns(self, content: str, num_columns: int) -> List[str]:
+        """
+        Интеллектуально разделяет содержимое для распределения по столбцам.
+        
+        Args:
+            content: Содержимое для разделения
+            num_columns: Количество столбцов
+            
+        Returns:
+            Список значений для каждого столбца
+        """
+        if not content.strip():
+            return []
+        
+        parts = content.strip().split()
+        
+        if num_columns == 1:
+            return [content.strip()]
+        elif num_columns == 2:
+            if len(parts) == 1:
+                # Только одно слово - вероятно ключ
+                return [parts[0], ""]
+            elif len(parts) >= 2:
+                # Первое слово - ключ, остальное - описание
+                return [parts[0], " ".join(parts[1:])]
+        else:
+            # Для большего количества столбцов равномерно распределяем
+            result = []
+            words_per_column = max(1, len(parts) // num_columns)
+            
+            for i in range(num_columns):
+                start_idx = i * words_per_column
+                if i == num_columns - 1:
+                    # Последний столбец получает все оставшиеся слова
+                    column_words = parts[start_idx:]
+                else:
+                    column_words = parts[start_idx:start_idx + words_per_column]
+                
+                result.append(" ".join(column_words))
+            
+            return result
+        
+        return [content.strip()]
+
+    async def _intelligent_text_search(self, source_file: str, instruction_text: str) -> Dict[str, Any]:
+        """
+        Интеллектуальный поиск текста с учетом контекста и вариаций.
+        Улучшенное распознавание для пунктов документа.
+        """
+        logger.info(f"🔍 ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК для: {instruction_text[:50]}...")
+        
+        search_result = {
+            "found": False,
+            "target_text": "",
+            "context": "",
+            "location": "",
+            "search_variants": []
+        }
+        
+        try:
+            # Правильно извлекаем целевую фразу из инструкции
+            instruction_data = self._extract_target_and_new_text(instruction_text)
+            
+            if instruction_data["instruction_type"] == "paragraph_phrase_replacement":
+                target_phrase = instruction_data["target_text"]
+                logger.info(f"🎯 Целевая фраза для поиска: '{target_phrase}'")
+                
+                # Создаем универсальные варианты поиска
+                search_variants = [
+                    target_phrase,  # Точная фраза
+                    " ".join(target_phrase.split()),  # Нормализованная (убираем лишние пробелы)
+                ]
+                
+                # Добавляем варианты с разными пробелами (универсально для любых фраз)
+                import re
+                # Нормализуем пробелы вокруг союзов и предлогов
+                normalized = re.sub(r'\s+и\s+', ' и ', target_phrase)
+                if normalized != target_phrase:
+                    search_variants.append(normalized)
+                
+                search_result["search_variants"] = search_variants
+                
+                # Ищем каждый вариант
+                for variant in search_variants:
+                    if len(variant.strip()) < 3:  # Пропускаем слишком короткие
+                        continue
+                        
+                    logger.info(f"🔎 Поиск варианта: '{variant}'")
+                    
+                    try:
+                        matches = await mcp_client.find_text_in_document(source_file, variant)
+                        if matches:
+                            match = matches[0]  # Берем первое совпадение
+                            # Правильный доступ к атрибутам MCPTextMatch
+                            if hasattr(match, 'location'):
+                                context = match.context if hasattr(match, 'context') else ""
+                                location = match.location
+                            else:
+                                # Для словарей используем .get()
+                                context = match.get("context", "") if isinstance(match, dict) else ""
+                                location = match.get("location", "") if isinstance(match, dict) else ""
+                            
+                            search_result.update({
+                                "found": True,
+                                "target_text": variant,
+                                "context": context,
+                                "location": location
+                            })
+                            logger.info(f"✅ НАЙДЕНО: '{variant}' в {location}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Ошибка поиска варианта '{variant}': {e}")
+                        continue
+                
+                if not search_result["found"]:
+                    logger.warning(f"⚠️ Ни один вариант не найден для фразы: '{target_phrase}'")
+            
+        except Exception as e:
+            logger.error(f"Ошибка интеллектуального поиска: {e}")
+        
+        return search_result
+
+    async def _add_change_annotations(self, source_file: str, results: List[Dict], session_id: str) -> Dict[str, Any]:
+        """
+        Добавляет автоматические аннотации в места изменений для отслеживания.
+        """
+        logger.info("📝 СОЗДАНИЕ АВТОМАТИЧЕСКИХ АННОТАЦИЙ")
+        
+        annotation_results = {
+            "annotations_added": 0,
+            "annotations_failed": 0,
+            "details": []
+        }
+        
+        try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            
+            for result in results:
+                if result.get("status") == "SUCCESS":
+                    change_id = result.get("change_id", "N/A")
+                    operation = result.get("operation", "")
+                    description = result.get("description", "")
+                    
+                    # Создаем текст аннотации
+                    annotation_text = f"[ИЗМЕНЕНИЕ {change_id}] {description} ({timestamp})"
+                    
+                    # Определяем, где добавить аннотацию
+                    target_text = ""
+                    
+                    # Пробуем разные способы извлечения target_text
+                    if "target_text" in result and result["target_text"]:
+                        target_text = result["target_text"]
+                    elif "target" in result and isinstance(result["target"], dict):
+                        target_text = result["target"].get("text", "")
+                    elif "details" in result and isinstance(result["details"], dict):
+                        # Пробуем извлечь из details
+                        details = result["details"]
+                        if "target_text" in details:
+                            target_text = details["target_text"]
+                        elif "target" in details and isinstance(details["target"], dict):
+                            target_text = details["target"].get("text", "")
+                    
+                    # Если все еще не нашли, пробуем извлечь из description
+                    if not target_text and description:
+                        import re
+                        # Ищем текст в кавычках в description
+                        quote_match = re.search(r'[«"]([^»"]+)[»"]', description)
+                        if quote_match:
+                            target_text = quote_match.group(1).strip()
+                            logger.info(f"   📍 Извлечен target_text из description: '{target_text[:30]}...'")
+                    
+                    if target_text:
+                        logger.info(f"📌 Добавление аннотации для {change_id}: '{target_text[:30]}...'")
+                        
+                        # Проверяем, было ли изменение в таблице и есть ли информация о местоположении
+                        is_table_change = False
+                        table_paragraph_index = None
+                        
+                        # Проверяем в details (куда попадает результат от _handle_replace_text)
+                        details = result.get("details", {})
+                        if isinstance(details, dict):
+                            if details.get("is_table_change", False):
+                                is_table_change = True
+                                # Если есть информация о местоположении таблицы, используем её
+                                if "table_location" in details and details["table_location"]:
+                                    table_paragraph_index = details["table_location"].get("paragraph_index")
+                                    logger.info(f"   📍 Используем paragraph_index из details.table_location: {table_paragraph_index}")
+                                elif "paragraph_index" in details and details["paragraph_index"] >= 0:
+                                    table_paragraph_index = details["paragraph_index"]
+                                    logger.info(f"   📍 Используем paragraph_index из details: {table_paragraph_index}")
+                            
+                            # Также проверяем на верхнем уровне (на случай прямого возврата)
+                            if not is_table_change and result.get("is_table_change", False):
+                                is_table_change = True
+                                if "table_location" in result and result["table_location"]:
+                                    table_paragraph_index = result["table_location"].get("paragraph_index")
+                                    logger.info(f"   📍 Используем paragraph_index из result.table_location: {table_paragraph_index}")
+                                elif "paragraph_index" in result and result["paragraph_index"] >= 0:
+                                    table_paragraph_index = result["paragraph_index"]
+                                    logger.info(f"   📍 Используем paragraph_index из result: {table_paragraph_index}")
+                        
+                        # Создаем операцию ADD_COMMENT
+                        comment_change = {
+                            "change_id": f"ANN-{change_id}",
+                            "operation": "ADD_COMMENT",
+                            "target": {
+                                "text": target_text
+                            },
+                            "payload": {
+                                "comment_text": annotation_text,
+                                "paragraph_hint": target_text[:50],  # Первые 50 символов как подсказка
+                                "is_table_change": is_table_change,  # Флаг, что изменение было в таблице
+                            },
+                            "description": f"Аннотация для изменения {change_id}"
+                        }
+                        
+                        # Если есть точный paragraph_index для таблицы, передаем его
+                        if table_paragraph_index is not None and table_paragraph_index >= 0:
+                            comment_change["payload"]["paragraph_index"] = table_paragraph_index
+                        
+                        # Выполняем добавление комментария
+                        try:
+                            logger.info(f"🔍 Попытка добавить аннотацию для {change_id}: target_text='{target_text[:50]}...'")
+                            comment_result = await self._handle_add_comment(source_file, comment_change)
+                            
+                            if comment_result.get("success"):
+                                annotation_results["annotations_added"] += 1
+                                annotation_results["details"].append({
+                                    "change_id": change_id,
+                                    "annotation_id": f"ANN-{change_id}",
+                                    "status": "SUCCESS",
+                                    "text": annotation_text
+                                })
+                                logger.info(f"✅ Аннотация {change_id} добавлена успешно")
+                            else:
+                                error_msg = comment_result.get("message", comment_result.get("error", "Неизвестная ошибка"))
+                                
+                                # Если target_text не найден, пробуем использовать new_text
+                                if "не найден" in error_msg.lower() or "anchor_not_found" in error_msg.lower():
+                                    logger.info(f"   🔄 Пробуем использовать new_text для аннотации {change_id}")
+                                    new_text = ""
+                                    if "payload" in result and isinstance(result["payload"], dict):
+                                        new_text = result["payload"].get("new_text", "")
+                                    
+                                    if new_text:
+                                        # Используем new_text для поиска места добавления аннотации
+                                        logger.info(f"   📍 Используем new_text для аннотации {change_id}: '{new_text[:50]}...'")
+                                        comment_change_new = {
+                                            "change_id": f"ANN-{change_id}",
+                                            "operation": "ADD_COMMENT",
+                                            "target": {
+                                                "text": new_text
+                                            },
+                                            "payload": {
+                                                "comment_text": annotation_text,
+                                                "paragraph_hint": new_text[:50]
+                                            },
+                                            "description": f"Аннотация для изменения {change_id}"
+                                        }
+                                        
+                                        try:
+                                            comment_result_new = await self._handle_add_comment(source_file, comment_change_new)
+                                            if comment_result_new.get("success"):
+                                                annotation_results["annotations_added"] += 1
+                                                annotation_results["details"].append({
+                                                    "change_id": change_id,
+                                                    "annotation_id": f"ANN-{change_id}",
+                                                    "status": "SUCCESS",
+                                                    "text": annotation_text
+                                                })
+                                                logger.info(f"✅ Аннотация {change_id} добавлена успешно (через new_text)")
+                                            else:
+                                                annotation_results["annotations_failed"] += 1
+                                                annotation_results["details"].append({
+                                                    "change_id": change_id,
+                                                    "annotation_id": f"ANN-{change_id}",
+                                                    "status": "FAILED",
+                                                    "error": comment_result_new.get("message", "Неизвестная ошибка")
+                                                })
+                                                logger.warning(f"⚠️ Не удалось добавить аннотацию для {change_id} (через new_text)")
+                                        except Exception as e:
+                                            annotation_results["annotations_failed"] += 1
+                                            logger.error(f"Ошибка добавления аннотации для {change_id} (через new_text): {e}")
+                                    else:
+                                        annotation_results["annotations_failed"] += 1
+                                        annotation_results["details"].append({
+                                            "change_id": change_id,
+                                            "annotation_id": f"ANN-{change_id}",
+                                            "status": "FAILED",
+                                            "error": error_msg
+                                        })
+                                        logger.warning(f"⚠️ Не удалось добавить аннотацию для {change_id}: {error_msg}")
+                                else:
+                                    annotation_results["annotations_failed"] += 1
+                                    annotation_results["details"].append({
+                                        "change_id": change_id,
+                                        "annotation_id": f"ANN-{change_id}",
+                                        "status": "FAILED",
+                                        "error": error_msg
+                                    })
+                                    logger.warning(f"⚠️ Не удалось добавить аннотацию для {change_id}: {error_msg}")
+                                
+                        except Exception as e:
+                            annotation_results["annotations_failed"] += 1
+                            logger.error(f"Ошибка добавления аннотации для {change_id}: {e}")
+                    else:
+                        # Пробуем использовать new_text из payload, если target_text не найден
+                        new_text = ""
+                        if "payload" in result and isinstance(result["payload"], dict):
+                            new_text = result["payload"].get("new_text", "")
+                        
+                        if new_text:
+                            # Используем new_text для поиска места добавления аннотации
+                            logger.info(f"   📍 Используем new_text для аннотации {change_id}: '{new_text[:30]}...'")
+                            target_text = new_text
+                            
+                            # Создаем операцию ADD_COMMENT с new_text
+                            comment_change = {
+                                "change_id": f"ANN-{change_id}",
+                                "operation": "ADD_COMMENT",
+                                "target": {
+                                    "text": target_text
+                                },
+                                "payload": {
+                                    "comment_text": annotation_text,
+                                    "paragraph_hint": target_text[:50]
+                                },
+                                "description": f"Аннотация для изменения {change_id}"
+                            }
+                            
+                            try:
+                                comment_result = await self._handle_add_comment(source_file, comment_change)
+                                
+                                if comment_result.get("success"):
+                                    annotation_results["annotations_added"] += 1
+                                    annotation_results["details"].append({
+                                        "change_id": change_id,
+                                        "annotation_id": f"ANN-{change_id}",
+                                        "status": "SUCCESS",
+                                        "text": annotation_text
+                                    })
+                                    logger.info(f"✅ Аннотация {change_id} добавлена успешно (через new_text)")
+                                else:
+                                    annotation_results["annotations_failed"] += 1
+                                    logger.warning(f"⚠️ Не удалось добавить аннотацию для {change_id} (через new_text)")
+                            except Exception as e:
+                                annotation_results["annotations_failed"] += 1
+                                logger.error(f"Ошибка добавления аннотации для {change_id}: {e}")
+                        else:
+                            logger.warning(f"⚠️ Не удалось определить target_text для аннотации {change_id} (нет target_text и new_text)")
+                            annotation_results["annotations_failed"] += 1
+                        
+        except Exception as e:
+            logger.error(f"Ошибка создания аннотаций: {e}")
+        
+        logger.info(f"📊 ИТОГ АННОТАЦИЙ: добавлено={annotation_results['annotations_added']}, ошибок={annotation_results['annotations_failed']}")
+        return annotation_results
+
+    async def _intelligent_table_update(self, source_file: str, table_analysis: Dict[str, Any], target_text: str) -> bool:
+        """
+        Адаптивное обновление таблицы на основе динамического анализа структуры.
+        """
+        logger.info(f"🔧 АДАПТИВНОЕ ОБНОВЛЕНИЕ ТАБЛИЦЫ")
+        
+        if not table_analysis.get("is_table_change") or not table_analysis.get("recommended_operations"):
+            logger.warning("Нет данных для интеллектуального обновления")
+            return False
+        
+        try:
+            target_key = table_analysis["instruction_mapping"]["target_key"]
+            operations = table_analysis["recommended_operations"]
+            
+            logger.info(f"📍 Поиск строки с ключом: '{target_key}'")
+            logger.info(f"🔧 Операций к выполнению: {len(operations)}")
+            
+            # Находим точное местоположение записи
+            matches = await mcp_client.find_text_in_document(source_file, target_key)
+            
+            if not matches:
+                logger.error(f"Строка с ключом '{target_key}' не найдена")
+                return False
+            
+            success_count = 0
+            
+            for match in matches:
+                # Правильный доступ к атрибутам MCPTextMatch
+                if hasattr(match, 'location'):
+                    location = match.location
+                else:
+                    # Для словарей используем .get()
+                    location = match.get('location', '') if isinstance(match, dict) else ''
+                    
+                if 'Table' in location:
+                    logger.info(f"📍 Обработка записи в: {location}")
+                    
+                    # Выполняем все операции для этой строки
+                    for operation in operations:
+                        column_idx = operation["column_index"]
+                        action = operation["action"]
+                        new_value = operation["new_value"]
+                        column_type = operation["column_type"]
+                        
+                        logger.info(f"🔄 Столбец {column_idx} ({column_type}): {action} → '{new_value}'")
+                        
+                        try:
+                            # ИНТЕЛЛЕКТУАЛЬНОЕ применение операции с учетом структуры таблицы
+                            if action == "replace":
+                                result = await self._smart_column_replace(
+                                    source_file, match, column_idx, new_value, target_key, location
+                                )
+                                
+                                if result:
+                                    success_count += 1
+                                    logger.info(f"✅ Столбец {column_idx} обновлен успешно: '{new_value}'")
+                                else:
+                                    logger.warning(f"⚠️ Не удалось обновить столбец {column_idx}")
+                                    
+                        except Exception as e:
+                            logger.error(f"Ошибка обновления столбца {column_idx}: {e}")
+                    
+                    # Обрабатываем только первое совпадение
+                    break
+            
+            logger.info(f"✅ РЕЗУЛЬТАТ: {success_count} из {len(operations)} операций выполнено успешно")
+            return success_count > 0
+                        
+        except Exception as e:
+            logger.error(f"Ошибка адаптивного обновления таблицы: {e}")
+        
+        return False
+    
+    async def _smart_column_replace(self, source_file: str, match: Any, column_idx: int, new_value: str, target_key: str, location: str) -> bool:
+        """
+        УПРОЩЕННАЯ замена содержимого таблицы.
+        Заменяет всю строку таблицы новым значением.
+        """
+        logger.info(f"🎯 ПРОСТАЯ ЗАМЕНА строки таблицы: '{target_key}' → '{new_value}'")
+        
+        try:
+            # Простая стратегия: заменяем ключ на полное новое значение
+            # Это работает для инструкций типа: строку «ДРМ» изложить в следующей редакции: «ДКР Департамент кредитных рисков»
+            result = await mcp_client.replace_text(source_file, target_key, new_value)
+            if result:
+                logger.info(f"✅ Успешная замена: '{target_key}' → '{new_value}'")
+                return True
+            else:
+                logger.warning(f"❌ Не удалось заменить: '{target_key}' → '{new_value}'")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Ошибка замены в таблице: {e}")
+            return False
+                    
+        except Exception as e:
+            logger.error(f"Ошибка умной замены столбца {column_idx}: {e}")
+            return False
+    
+    async def _find_description_in_same_row(self, source_file: str, target_key: str, context: str) -> Optional[str]:
+        """
+        Находит описание во втором столбце той же строки таблицы.
+        
+        Args:
+            source_file: Путь к файлу
+            target_key: Ключ первого столбца
+            context: Контекст найденной ячейки
+            
+        Returns:
+            Текст описания или None
+        """
+        try:
+            # Получаем весь текст документа
+            doc_text = await mcp_client.get_document_text(source_file)
+            
+            # Ищем строку с ключом
+            import re
+            
+            # Паттерн для поиска строки таблицы с ключом
+            # Предполагаем, что строка содержит ключ и описание, разделенные табуляцией или пробелами
+            patterns = [
+                rf'{re.escape(target_key)}\s+([^\n\r\t]+)',  # Ключ + пробелы + описание
+                rf'{re.escape(target_key)}\t+([^\n\r\t]+)',  # Ключ + табуляция + описание
+                rf'{re.escape(target_key)}\s*\|\s*([^\n\r\|]+)',  # Ключ | описание
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, doc_text, re.IGNORECASE)
+                if match:
+                    description = match.group(1).strip()
+                    if description and description != target_key:
+                        logger.info(f"🔍 Найдено описание: '{description[:50]}...'")
+                        return description
+            
+            # Если не нашли по паттернам, пробуем использовать контекст
+            if context and len(context) > len(target_key) * 2:
+                # Контекст длиннее ключа в 2 раза - вероятно содержит описание
+                # Убираем ключ из контекста
+                description = context.replace(target_key, '').strip()
+                if description:
+                    logger.info(f"🔍 Извлечено описание из контекста: '{description[:50]}...'")
+                    return description
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Ошибка поиска описания: {e}")
+            return None
+
+    def _analyze_operation_order(self, changes: List[Dict[str, Any]], original_text: str) -> List[Dict[str, Any]]:
+        """
+        Анализирует порядок операций и выявляет потенциальные конфликты.
+        Переставляет операции для предотвращения конфликтов.
+        """
+        logger.info("🔄 АНАЛИЗ ПОРЯДКА ОПЕРАЦИЙ")
+        
+        # Разделяем операции по типам
+        mass_replacements = []
+        specific_changes = []
+        other_operations = []
+        
+        for i, change in enumerate(changes):
+            description = change.get("description", "").lower()
+            operation = change.get("operation", "")
+            
+            # Определяем тип операции
+            if "по всему тексту" in description and operation == "REPLACE_TEXT":
+                mass_replacements.append((i, change))
+                logger.info(f"📋 МАССОВАЯ ЗАМЕНА: {change.get('change_id')} - {description[:50]}...")
+            elif ("пункт" in description or "строку" in description) and "replace" in operation.lower():
+                specific_changes.append((i, change))
+                logger.info(f"📋 СПЕЦИФИЧЕСКОЕ ИЗМЕНЕНИЕ: {change.get('change_id')} - {description[:50]}...")
+            else:
+                other_operations.append((i, change))
+        
+        # Проверяем конфликты
+        conflicts_detected = False
+        if mass_replacements and specific_changes:
+            for mass_idx, mass_change in mass_replacements:
+                for spec_idx, spec_change in specific_changes:
+                    if mass_idx < spec_idx:
+                        conflicts_detected = True
+                        logger.warning(f"⚠️ КОНФЛИКТ: Массовая замена {mass_change.get('change_id')} выполняется ДО специфического изменения {spec_change.get('change_id')}")
+        
+        # ПРИНУДИТЕЛЬНОЕ переупорядочивание если есть массовые замены
+        if mass_replacements:
+            logger.warning("🔄 ПРИНУДИТЕЛЬНОЕ ПЕРЕУПОРЯДОЧИВАНИЕ: Массовые замены перемещаются в конец")
+            
+            # Новый порядок: специфические изменения → другие операции → массовые замены
+            reordered_changes = []
+            
+            # 1. Добавляем специфические изменения
+            for _, change in specific_changes:
+                reordered_changes.append(change)
+                logger.info(f"✅ Перемещено в начало: {change.get('change_id')}")
+            
+            # 2. Добавляем другие операции
+            for _, change in other_operations:
+                reordered_changes.append(change)
+            
+            # 3. Добавляем массовые замены в конец
+            for _, change in mass_replacements:
+                reordered_changes.append(change)
+                logger.info(f"✅ Перемещено в конец: {change.get('change_id')}")
+            
+            # Обновляем change_id для сохранения порядка
+            for i, change in enumerate(reordered_changes, 1):
+                change["change_id"] = f"CHG-{i:03d}"
+                change["reordered"] = True
+            
+            logger.warning(f"🔄 ОПЕРАЦИИ ПЕРЕУПОРЯДОЧЕНЫ: {len(reordered_changes)} изменений")
+            return reordered_changes
+        else:
+            logger.info("✅ ПОРЯДОК ОПЕРАЦИЙ корректен, массовых замен не обнаружено")
+            return changes
+
+    def _validate_and_fix_json(self, parsed_json: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Валидация и исправление JSON от LLM.
+        
+        Args:
+            parsed_json: Распарсенный JSON от LLM
+            
+        Returns:
+            Исправленный JSON
+        """
+        logger.info("🔍 ВАЛИДАЦИЯ JSON от LLM")
+        
+        # Исправляем операцию REPLACE_POINT_TEXT -> REPLACE_TEXT
+        if parsed_json.get('operation') == 'REPLACE_POINT_TEXT':
+            parsed_json['operation'] = 'REPLACE_TEXT'
+            logger.info(f"🔧 Исправлена операция: REPLACE_POINT_TEXT -> REPLACE_TEXT для {parsed_json.get('change_id', 'неизвестно')}")
+        
+        # Проверяем основную структуру
+        if not isinstance(parsed_json, dict):
+            raise ValueError("JSON должен быть объектом")
+        
+        # Проверяем наличие массива changes
+        if "changes" not in parsed_json:
+            raise ValueError("JSON должен содержать массив 'changes'")
+        
+        changes = parsed_json["changes"]
+        if not isinstance(changes, list):
+            raise ValueError("'changes' должен быть массивом")
+        
+        fixed_changes = []
+        
+        for i, change in enumerate(changes):
+            if not isinstance(change, dict):
+                logger.warning(f"⚠️ Изменение {i+1} не является объектом, пропускаем")
+                continue
+            
+            # Исправляем обязательные поля
+            fixed_change = self._fix_change_object(change, i+1)
+            if fixed_change:
+                fixed_changes.append(fixed_change)
+        
+        parsed_json["changes"] = fixed_changes
+        logger.info(f"✅ JSON валидирован: {len(fixed_changes)} изменений")
+        
+        return parsed_json
+    
+    def _fix_change_object(self, change: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
+        """
+        Исправление объекта изменения.
+        
+        Args:
+            change: Объект изменения
+            index: Индекс изменения (для логирования)
+            
+        Returns:
+            Исправленный объект или None если не удалось исправить
+        """
+        try:
+            # Обязательные поля
+            required_fields = ["change_id", "operation", "target", "payload", "description"]
+            
+            for field in required_fields:
+                if field not in change:
+                    logger.warning(f"⚠️ CHG-{index:03d}: отсутствует поле '{field}'")
+                    if field == "change_id":
+                        change[field] = f"CHG-{index:03d}"
+                    elif field == "description":
+                        change[field] = f"Изменение {index}"
+                    elif field == "target":
+                        change[field] = {}
+                    elif field == "payload":
+                        change[field] = {}
+                    else:
+                        logger.error(f"❌ CHG-{index:03d}: критическое поле '{field}' отсутствует")
+                        return None
+            
+            # Проверяем target.text
+            target = change.get("target", {})
+            if not isinstance(target, dict):
+                logger.warning(f"⚠️ CHG-{index:03d}: target не является объектом")
+                target = {}
+                change["target"] = target
+            
+            if "text" not in target or not target["text"]:
+                logger.error(f"❌ CHG-{index:03d}: target.text отсутствует или пустой")
+                return None
+            
+            # СТРОГАЯ ВАЛИДАЦИЯ target.text
+            target_text = target["text"]
+            description = change.get("description", "").lower()
+            original_description = change.get("description", "")
+            
+            # Проверяем что target.text не является номером пункта
+            if self._is_paragraph_number(target_text):
+                logger.warning(f"⚠️ CHG-{index:03d}: target.text '{target_text}' похож на номер пункта")
+                # Пытаемся извлечь правильный target.text из description
+                corrected_text = self._extract_target_from_description(original_description)
+                if corrected_text:
+                    target["text"] = corrected_text
+                    logger.info(f"🔧 CHG-{index:03d}: исправлено target.text: '{target_text}' → '{corrected_text}'")
+                else:
+                    # Если не удалось извлечь, пробуем альтернативные методы
+                    alternative_text = self._extract_alternative_target(original_description, target_text)
+                    if alternative_text:
+                        target["text"] = alternative_text
+                        logger.info(f"🔧 CHG-{index:03d}: найден альтернативный target.text: '{target_text}' → '{alternative_text}'")
+                    else:
+                        # Последняя попытка: ищем в исходном тексте инструкций
+                        if self._original_instructions_text:
+                            logger.info(f"🔍 CHG-{index:03d}: последняя попытка - поиск в исходных инструкциях")
+                            # Ищем паттерн для пунктов: "В пункте N слова «...»"
+                            import re
+                            paragraph_num_match = re.search(r'\d+', target_text)
+                            if paragraph_num_match:
+                                paragraph_num = paragraph_num_match.group(0)
+                                # Ищем в исходных инструкциях
+                                patterns = [
+                                    rf'пункте\s+{paragraph_num}\s+слова\s*[«"](.*?)[»"]',
+                                    rf'пункте\s+{paragraph_num}\s+слова\s+([^изложить]+?)(?:\s+изложить|\s+в\s+следующей)',
+                                ]
+                                for pattern in patterns:
+                                    match = re.search(pattern, self._original_instructions_text, re.IGNORECASE | re.DOTALL)
+                                    if match:
+                                        extracted = match.group(1).strip().rstrip('«»"')
+                                        if extracted and not self._is_paragraph_number(extracted):
+                                            target["text"] = extracted
+                                            logger.info(f"🔧 CHG-{index:03d}: исправлено из исходных инструкций: '{target_text}' → '{extracted}'")
+                                            break
+                        
+                        if target["text"] == target_text:  # Если не исправили
+                            logger.error(f"❌ CHG-{index:03d}: не удалось исправить target.text")
+                            # НЕ отклоняем изменение, а продолжаем с исходным target.text
+                            logger.warning(f"⚠️ CHG-{index:03d}: продолжаем с исходным target.text: '{target_text}'")
+            
+            # Дополнительная проверка: если target.text пустой или слишком короткий
+            elif len(target_text.strip()) < 2:
+                logger.warning(f"⚠️ CHG-{index:03d}: target.text '{target_text}' слишком короткий")
+                corrected_text = self._extract_target_from_description(original_description)
+                if corrected_text:
+                    target["text"] = corrected_text
+                    logger.info(f"🔧 CHG-{index:03d}: исправлено короткий target.text: '{target_text}' → '{corrected_text}'")
+                else:
+                    logger.error(f"❌ CHG-{index:03d}: не удалось исправить короткий target.text")
+                    return None
+            
+            # Проверка на кавычки в target.text (убираем их если есть)
+            elif any(quote in target_text for quote in ['«', '»', '"', '"', "'", '„']):
+                import re
+                # Убираем все виды кавычек для поиска в документе
+                cleaned_text = re.sub(r'[«»""\'„]', '', target_text).strip()
+                if cleaned_text != target_text:
+                    target["text"] = cleaned_text
+                    logger.info(f"🔧 CHG-{index:03d}: убраны кавычки из target.text для поиска: '{target_text}' → '{cleaned_text}'")
+            
+            # Проверяем payload.new_text для REPLACE_TEXT
+            payload = change.get("payload", {})
+            if not isinstance(payload, dict):
+                logger.warning(f"⚠️ CHG-{index:03d}: payload не является объектом")
+                payload = {}
+                change["payload"] = payload
+            
+            operation = change.get("operation", "")
+            if operation == "REPLACE_TEXT":
+                # Исправляем неправильное поле "text" на "new_text"
+                if "text" in payload and "new_text" not in payload:
+                    payload["new_text"] = payload["text"]
+                    del payload["text"]
+                    logger.info(f"🔧 CHG-{index:03d}: исправлено payload.text → payload.new_text")
+                
+                if "new_text" not in payload or not payload["new_text"]:
+                    logger.error(f"❌ CHG-{index:03d}: payload.new_text отсутствует или пустой")
+                    return None
+            
+            # Проверяем валидность операции
+            valid_operations = ["REPLACE_TEXT", "DELETE_PARAGRAPH", "INSERT_PARAGRAPH", "ADD_COMMENT"]
+            if operation not in valid_operations:
+                logger.warning(f"⚠️ CHG-{index:03d}: неизвестная операция '{operation}', заменяем на REPLACE_TEXT")
+                change["operation"] = "REPLACE_TEXT"
+            
+            logger.info(f"✅ CHG-{index:03d}: валидирован ({operation})")
+            return change
+            
+        except Exception as e:
+            logger.error(f"❌ CHG-{index:03d}: ошибка валидации - {e}")
+            return None
+
+    def _is_paragraph_number(self, text: str) -> bool:
+        """
+        Проверяет, является ли текст номером пункта.
+        
+        Args:
+            text: Текст для проверки
+            
+        Returns:
+            True если текст похож на номер пункта
+        """
+        import re
+        
+        # Паттерны для номеров пунктов
+        patterns = [
+            r'^\d+\.$',  # 32.
+            r'^\d+\)$',  # 32)
+            r'^п\.\s*\d+$',  # п.32, п. 32
+            r'^\d+\.\d+\.$',  # 32.1.
+            r'^\d+$'  # просто число
+        ]
+        
+        text_clean = text.strip()
+        for pattern in patterns:
+            if re.match(pattern, text_clean, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _extract_target_from_description(self, description: str) -> Optional[str]:
+        """
+        Извлекает правильный target.text из описания инструкции.
+        Улучшенная версия с поддержкой различных паттернов.
+        
+        Args:
+            description: Описание инструкции
+            
+        Returns:
+            Извлеченный target.text или None
+        """
+        import re
+        
+        logger.info(f"🔍 ИЗВЛЕЧЕНИЕ TARGET из описания: '{description}'")
+        
+        # Расширенные паттерны для извлечения текста
+        patterns = [
+            # Универсальные паттерны для пунктов
+            r'пункте\s+\d+\s+слова\s*[«"](.*?)[»"]',  # В пункте N слова «текст»
+            
+            # Основные паттерны с контекстом
+            r'строку\s*[«"](.*?)[»"]',  # строку «текст»
+            r'слова\s*[«"](.*?)[»"]',   # слова «текст»
+            r'фразу\s*[«"](.*?)[»"]',   # фразу «текст»
+            r'текст\s*[«"](.*?)[»"]',   # текст «текст»
+            r'аббревиатуру\s*[«"](.*?)[»"]',  # аббревиатуру «текст»
+            
+            # Паттерны для разных типов кавычек
+            r'[«"](.*?)[»"]',  # основные кавычки
+            r'"(.*?)"',  # обычные двойные кавычки
+            r"'(.*?)'",  # одинарные кавычки
+            
+            # Паттерны без кавычек (как резерв)
+            r'строку\s+([А-ЯЁа-яё\s]+?)(?:\s+изложить|\s+заменить|$)',  # строку ТЕКСТ изложить
+            r'слова\s+([А-ЯЁа-яё\s]+?)(?:\s+изложить|\s+заменить|$)',   # слова ТЕКСТ изложить
+            r'аббревиатуру\s+([А-ЯЁ]+)',  # аббревиатуру СЛОВО
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, description, re.IGNORECASE | re.DOTALL)
+            if match:
+                extracted = match.group(1).strip()
+                # Убираем лишние пробелы и символы
+                extracted = re.sub(r'\s+', ' ', extracted)
+                if extracted and not self._is_paragraph_number(extracted):
+                    logger.info(f"🎯 Извлечен target.text: '{extracted}' (паттерн: {pattern[:30]}...)")
+                    return extracted
+        
+        # Дополнительная попытка: ищем ключевые слова для пунктов
+        if 'пункте' in description.lower() and 'слова' in description.lower():
+            # Для любого пункта ищем фразу после "слова"
+            match = re.search(r'слова\s+([^изложить]+?)(?:\s+изложить|$)', description, re.IGNORECASE)
+            if match:
+                extracted_text = match.group(1).strip().rstrip('«»"')
+                if extracted_text and not self._is_paragraph_number(extracted_text):
+                    logger.info(f"🎯 Извлечен target.text для пункта: '{extracted_text}'")
+                    return extracted_text
+            
+            # Если не нашли в description, ищем в исходном тексте инструкций
+            if self._original_instructions_text:
+                logger.info("🔍 Поиск target.text в исходном тексте инструкций для пункта")
+                # Универсальный паттерн для любого пункта: "В пункте N слова «...»"
+                patterns = [
+                    r'пункте\s+\d+\s+слова\s*[«"](.*?)[»"]',  # В пункте N слова «текст»
+                    r'пункте\s+\d+\s+слова\s+([^изложить]+?)(?:\s+изложить|\s+в\s+следующей)',  # В пункте N слова текст изложить
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, self._original_instructions_text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        extracted_text = match.group(1).strip().rstrip('«»"')
+                        if extracted_text and not self._is_paragraph_number(extracted_text):
+                            logger.info(f"🎯 Извлечен target.text из исходных инструкций: '{extracted_text}'")
+                            return extracted_text
+        
+        logger.warning(f"⚠️ Не удалось извлечь target.text из описания: '{description}'")
+        return None
+
+    def _extract_alternative_target(self, description: str, current_target: str) -> Optional[str]:
+        """
+        Альтернативные методы извлечения target.text для сложных случаев.
+        
+        Args:
+            description: Описание инструкции
+            current_target: Текущий неправильный target.text
+            
+        Returns:
+            Альтернативный target.text или None
+        """
+        import re
+        
+        logger.info(f"🔍 АЛЬТЕРНАТИВНОЕ ИЗВЛЕЧЕНИЕ для: '{description}'")
+        
+        # Универсальные паттерны для пунктов
+        if "пункте" in description.lower() and "слова" in description.lower():
+            # Ищем фразы после "слова" с кавычками и без
+            patterns = [
+                r'слова\s*[«"\'„]([^»"\']+)[»"\'"]',  # слова «текст»
+                r'слова\s+([^изложить]+?)(?:\s+изложить|$)',  # слова ТЕКСТ изложить
+                r'слова\s+(.*?)(?:\s+изложить|\s+в\s+следующей|\s+заменить|$)',  # более широкий поиск
+                r'\d+\s+слова\s+(.*?)(?:\s+изложить|$)',  # пункте N слова ТЕКСТ
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, description, re.IGNORECASE)
+                if match:
+                    extracted = match.group(1).strip()
+                    # Убираем кавычки и лишние символы
+                    extracted = re.sub(r'[«»"\'„]', '', extracted).strip()
+                    if extracted and len(extracted) > 3 and not self._is_paragraph_number(extracted):
+                        logger.info(f"🎯 Альтернативное извлечение: '{extracted}'")
+                        return extracted
+        
+        # Для таблиц - ищем аббревиатуры в кавычках
+        if "таблице" in description.lower():
+            patterns = [
+                r'строку\s*[«"\'„]([А-ЯЁ]{2,6})[»"\'"]',  # строку «ДРМ»
+                r'[«"\'„]([А-ЯЁ]{2,6})[»"\'"]',  # просто «ДРМ»
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, description)
+                if match:
+                    extracted = match.group(1).strip()
+                    logger.info(f"🎯 Альтернативное извлечение для таблицы: '{extracted}'")
+                    return extracted
+        
+        logger.warning(f"⚠️ Альтернативное извлечение не дало результатов")
+        return None
+
+    def _optimize_operation_order(self, changes: List[Dict]) -> List[Dict]:
+        """
+        Оптимизирует порядок операций для предотвращения конфликтов.
+        
+        Правила оптимизации:
+        1. Глобальные замены (по всему тексту) - ПОСЛЕДНИМИ
+        2. Локальные изменения в таблицах - ПЕРВЫМИ
+        3. Локальные изменения в пунктах - ВТОРЫМИ
+        
+        Args:
+            changes: Список изменений
+            
+        Returns:
+            Оптимизированный список изменений
+        """
+        logger.info(f"🔄 ОПТИМИЗАЦИЯ ПОРЯДКА ОПЕРАЦИЙ для {len(changes)} изменений")
+        
+        global_changes = []
+        table_changes = []
+        paragraph_changes = []
+        other_changes = []
+        
+        for change in changes:
+            description = change.get("description", "").lower()
+            
+            # Определяем тип изменения
+            if any(keyword in description for keyword in ["по всему тексту", "по всему документу", "везде в документе"]):
+                global_changes.append(change)
+                logger.info(f"   🌍 Глобальное изменение: {change.get('change_id', 'N/A')}")
+            elif "таблице" in description:
+                table_changes.append(change)
+                logger.info(f"   📊 Изменение в таблице: {change.get('change_id', 'N/A')}")
+            elif any(keyword in description for keyword in ["пункте", "разделе", "параграфе"]):
+                paragraph_changes.append(change)
+                logger.info(f"   📄 Изменение в пункте: {change.get('change_id', 'N/A')}")
+            else:
+                other_changes.append(change)
+                logger.info(f"   ❓ Другое изменение: {change.get('change_id', 'N/A')}")
+        
+        # Оптимальный порядок: таблицы → пункты → другие → глобальные
+        optimized = table_changes + paragraph_changes + other_changes + global_changes
+        
+        logger.info(f"📋 ОПТИМИЗИРОВАННЫЙ ПОРЯДОК:")
+        for i, change in enumerate(optimized, 1):
+            logger.info(f"   {i}. {change.get('change_id', 'N/A')}: {change.get('description', 'N/A')[:50]}...")
+        
+        return optimized
+
+    async def _simple_parse_changes_with_llm(
+        self, 
+        changes_text: str, 
+        initial_changes: Optional[List[Dict[str, Any]]] = None
+    ) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+        """
+        Простое преобразование текстовых инструкций в структурированный JSON через LLM.
+        БЕЗ двухэтапного анализа - только базовый парсинг и валидация.
+        
+        Returns:
+            Tuple[список изменений, словарь с информацией о токенах]
+        """
+        if not self.openai_client:
+            raise RuntimeError("OpenAI клиент не инициализирован")
+
+        logger.info(f"📝 Простой парсинг инструкций: {len(changes_text)} символов")
+        logger.info(f"🔍 СОДЕРЖИМОЕ ИНСТРУКЦИЙ (первые 500 символов): {changes_text[:500]}...")
+
+        # Загружаем промпты
+        system_prompt = self._load_prompt("instruction_check_system.md")
+        user_prompt = self._load_prompt("instruction_check_user.md")
+        
+        # Формируем запрос к LLM
+        user_message = f"{user_prompt}\n\nТекст инструкций:\n{changes_text}"
+        
+        logger.info(f"Отправка запроса к LLM: модель=gpt-4o, длина промпта={len(user_message)} символов")
+        
+        try:
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                temperature=0.1,
+                max_tokens=4000
+            )
+            
+            logger.info("Ответ от LLM получен успешно")
+            
+            # Извлекаем JSON из ответа
+            response_text = response.choices[0].message.content.strip()
+            logger.info(f"🔍 ОТВЕТ LLM (первые 500 символов): {response_text[:500]}...")
+            
+            # Парсим JSON
+            changes_json = self._extract_json_from_response(response_text)
+            if not changes_json:
+                raise ValueError("Не удалось извлечь JSON из ответа LLM")
+            
+            logger.info(f"🔍 ИЗВЛЕЧЕННЫЙ JSON: {changes_json}")
+            
+            # Исправляем операции REPLACE_POINT_TEXT -> REPLACE_TEXT
+            for change in changes_json:
+                if isinstance(change, dict) and change.get('operation') == 'REPLACE_POINT_TEXT':
+                    change['operation'] = 'REPLACE_TEXT'
+                    logger.info(f"🔧 Исправлена операция: REPLACE_POINT_TEXT -> REPLACE_TEXT для {change.get('change_id', 'неизвестно')}")
+            
+            # Простая валидация JSON (список изменений)
+            logger.info("🔍 ПРОСТАЯ ВАЛИДАЦИЯ JSON от LLM")
+            if not isinstance(changes_json, list):
+                logger.error("JSON должен быть списком изменений")
+                raise ValueError("JSON должен быть списком изменений")
+            
+            # Валидируем и исправляем каждое изменение
+            validated_changes = []
+            for idx, change in enumerate(changes_json, start=1):
+                if isinstance(change, dict):
+                    fixed_change = self._fix_change_object(change, idx)
+                    if fixed_change:
+                        validated_changes.append(fixed_change)
+                    else:
+                        logger.warning(f"⚠️ Изменение {idx} не прошло валидацию и будет пропущено")
+                else:
+                    logger.warning(f"⚠️ Изменение {idx} не является объектом и будет пропущено")
+            
+            # Подсчитываем токены
+            tokens_info = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            }
+            
+            logger.info(f"✅ Простой парсинг завершен: {len(validated_changes)} изменений")
+            logger.info(f"Использовано токенов: {tokens_info['total_tokens']} (prompt: {tokens_info['prompt_tokens']}, completion: {tokens_info['completion_tokens']})")
+            
+            return validated_changes, tokens_info
+            
+        except Exception as e:
+            logger.error(f"Ошибка простого парсинга с LLM: {e}")
+            raise
+
+    def _extract_json_from_response(self, response_text: str) -> Optional[List[Dict]]:
+        """
+        Извлекает JSON из ответа LLM.
+        
+        Args:
+            response_text: Текст ответа от LLM
+            
+        Returns:
+            Список изменений в формате JSON или None
+        """
+        import json
+        import re
+        
+        try:
+            # Ищем JSON блок в ответе
+            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(1).strip()
+            else:
+                # Если нет блока ```json```, ищем массив JSON
+                json_match = re.search(r'\[\s*\{.*?\}\s*\]', response_text, re.DOTALL)
+                if json_match:
+                    json_text = json_match.group(0)
+                else:
+                    # Пытаемся парсить весь ответ как JSON
+                    json_text = response_text.strip()
+            
+            # Парсим JSON
+            changes = json.loads(json_text)
+            logger.info(f"🔍 ПАРСИНГ JSON: тип={type(changes)}, длина={len(changes) if isinstance(changes, (list, dict)) else 'N/A'}")
+            
+            # Проверяем различные форматы JSON от LLM
+            if isinstance(changes, list):
+                logger.info(f"🔍 JSON является списком, длина={len(changes)}")
+                # Если список содержит один элемент-словарь с полем 'changes'
+                if len(changes) == 1 and isinstance(changes[0], dict) and 'changes' in changes[0]:
+                    logger.info("✅ JSON содержит список с полем 'changes', извлекаем массив изменений")
+                    changes = changes[0]['changes']
+                    logger.info(f"✅ Извлечено {len(changes)} изменений из поля 'changes'")
+                # Если список уже содержит массив изменений - оставляем как есть
+                else:
+                    logger.info(f"✅ JSON является списком изменений, длина={len(changes)}")
+            elif isinstance(changes, dict):
+                if 'changes' in changes:
+                    logger.info("JSON содержит поле 'changes', извлекаем массив изменений")
+                    changes = changes['changes']
+                else:
+                    logger.warning("JSON не является списком и не содержит 'changes', пытаемся обернуть в список")
+                    changes = [changes]
+            else:
+                logger.warning("JSON имеет неожиданный формат, пытаемся обернуть в список")
+                changes = [changes] if changes else []
+            
+            logger.info(f"Успешно извлечен JSON с {len(changes)} изменениями")
+            return changes
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON: {e}")
+            logger.debug(f"Проблемный JSON: {response_text[:500]}...")
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка извлечения JSON: {e}")
+            return None
+
+    def _validate_and_correct_operations(self, changes: List[Dict[str, Any]], original_text: str) -> List[Dict[str, Any]]:
+        """
+        Валидация и автокоррекция неправильно выбранных операций LLM.
+        
+        Args:
+            changes: Список изменений от LLM
+            original_text: Исходный текст инструкций
+            
+        Returns:
+            Скорректированный список изменений
+        """
+        logger.info(f"🔍 НАЧАЛО ВАЛИДАЦИИ: получено {len(changes)} изменений")
+        corrected_changes = []
+        corrections_made = 0
+        
+        for change in changes:
+            operation = change.get("operation", "")
+            description = change.get("description", "").lower()
+            change_id = change.get("change_id", "")
+            
+            logger.info(f"🔍 ВАЛИДАЦИЯ {change_id}: operation={operation}, description='{description[:50]}...'")
+            
+            # Создаем копию изменения для модификации
+            corrected_change = change.copy()
+            original_operation = operation
+            
+            # ПРАВИЛА АВТОКОРРЕКЦИИ:
+            
+            # 1. Если в описании есть "слова", "строку", "фразу" - это REPLACE_TEXT
+            if operation == "REPLACE_POINT_TEXT":
+                keywords_for_replace_text = ["слова", "строку", "фразу", "текст", "аббревиатуру"]
+                if any(keyword in description for keyword in keywords_for_replace_text):
+                    corrected_change["operation"] = "REPLACE_TEXT"
+                    logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (найдено ключевое слово)")
+                    corrections_made += 1
+            
+            # 2. Если упоминается "в таблице" - это REPLACE_TEXT
+            if operation == "REPLACE_POINT_TEXT" and "в таблице" in description:
+                corrected_change["operation"] = "REPLACE_TEXT"
+                logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (таблица)")
+                corrections_made += 1
+            
+            # 3. Если упоминается "по всему тексту" - это REPLACE_TEXT с replace_all=true
+            if "по всему тексту" in description:
+                corrected_change["operation"] = "REPLACE_TEXT"
+                if "target" in corrected_change and isinstance(corrected_change["target"], dict):
+                    corrected_change["target"]["replace_all"] = True
+                logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: установлен replace_all=true (массовая замена)")
+                corrections_made += 1
+            
+            # 4. Проверяем исходный текст инструкций для дополнительной валидации
+            if change_id and original_text:
+                # Ищем соответствующую инструкцию в исходном тексте
+                lines = original_text.split('\n')
+                instruction_text = ""
+                
+                # Пробуем разные способы найти инструкцию
+                for line in lines:
+                    line_clean = line.strip().lower()
+                    # Ищем строку с номером изменения (1., 2., 3., 4.)
+                    if any(marker in line_clean for marker in [f"{change_id[-1]}.", f"{change_id[-1]} "]):
+                        instruction_text = line_clean
+                        break
+                
+                if instruction_text:
+                    # Дополнительная проверка по исходной инструкции
+                    if operation == "REPLACE_POINT_TEXT":
+                        correction_triggers = [
+                            "слова", "строку", "фразу", "в таблице", 
+                            "аббревиатуру", "по всему тексту"
+                        ]
+                        if any(trigger in instruction_text for trigger in correction_triggers):
+                            corrected_change["operation"] = "REPLACE_TEXT"
+                            logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (анализ исходной инструкции: '{instruction_text[:50]}...')")
+                            corrections_made += 1
+            
+            # 5. Специальные правила для конкретных паттернов
+            if operation == "REPLACE_POINT_TEXT":
+                # Если в описании упоминается конкретная замена текста
+                replace_patterns = ["изложить в следующей редакции", "заменить на", "изменить на"]
+                table_patterns = ["в таблице", "строку"]
+                
+                has_replace_pattern = any(pattern in description for pattern in replace_patterns)
+                has_table_pattern = any(pattern in description for pattern in table_patterns)
+                
+                if has_replace_pattern and has_table_pattern:
+                    corrected_change["operation"] = "REPLACE_TEXT"
+                    logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (паттерн замены в таблице)")
+                    corrections_made += 1
+            
+            # Логируем если операция была изменена
+            if corrected_change["operation"] != original_operation:
+                logger.info(f"✅ Операция скорректирована: {change_id} {original_operation} → {corrected_change['operation']}")
+            
+            corrected_changes.append(corrected_change)
+        
+        # Детальное логирование результатов валидации
+        if corrections_made > 0:
+            logger.warning(f"🔧 ВАЛИДАЦИЯ: Выполнено {corrections_made} автокоррекций операций")
+            logger.info("📋 ИТОГОВЫЕ ОПЕРАЦИИ ПОСЛЕ ВАЛИДАЦИИ:")
+            for change in corrected_changes:
+                logger.info(f"  {change.get('change_id')}: {change.get('operation')} - {change.get('description', '')[:60]}...")
+        else:
+            logger.info("✅ ВАЛИДАЦИЯ: Все операции корректны")
+        
+        return corrected_changes
+
+    async def _enhanced_parse_changes_with_llm(
+        self, 
+        changes_text: str, 
+        source_file: str,
+        initial_changes: Optional[List[Dict[str, Any]]] = None
+    ) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+        """
+        УЛУЧШЕННЫЙ двухэтапный парсинг инструкций с анализом контекста и MCP инструментов.
+        
+        ЭТАП 1: Анализ контекста каждой инструкции
+        ЭТАП 2: Выбор правильной MCP операции на основе контекста
+        """
+        logger.info("🚀 ЗАПУСК УЛУЧШЕННОГО ДВУХЭТАПНОГО АНАЛИЗА")
+        
+        # Сначала выполняем стандартный парсинг
+        changes, tokens_info = await self._parse_changes_with_llm(changes_text, initial_changes)
+        
+        # ОТКЛЮЧЕНО: Сохраняем исходный порядок инструкций из файла
+        # changes = self._analyze_operation_order(changes, changes_text)
+        # КРИТИЧЕСКИ ВАЖНО: Анализируем порядок операций для предотвращения конфликтов
+        optimized_changes = self._optimize_operation_order(changes)
+        if len(optimized_changes) != len(changes):
+            logger.warning(f"⚠️ Количество операций изменилось при оптимизации: {len(changes)} → {len(optimized_changes)}")
+        else:
+            changes = optimized_changes
+            logger.info("📋 ПОРЯДОК ОПЕРАЦИЙ: Оптимизирован для предотвращения конфликтов")
+        
+        # Затем анализируем контекст каждой инструкции и корректируем операции
+        enhanced_changes = []
+        corrections_made = 0
+        
+        logger.info(f"🔍 АНАЛИЗ КОНТЕКСТА ДЛЯ {len(changes)} ИНСТРУКЦИЙ")
+        
+        for change in changes:
+            change_id = change.get("change_id", "")
+            description = change.get("description", "")
+            operation = change.get("operation", "")
+            
+            # Создаем копию изменения для обработки
+            enhanced_change = change.copy()
+            
+            logger.info(f"📋 АНАЛИЗ {change_id}: {description[:60]}...")
+            
+            # Анализируем контекст инструкции
+            try:
+                # Ищем исходную инструкцию в тексте
+                instruction_lines = changes_text.split('\n')
+                instruction_text = ""
+                
+                for line in instruction_lines:
+                    if any(marker in line for marker in [f"{change_id[-1]}.", f"{change_id[-1]} "]):
+                        instruction_text = line.strip()
+                        break
+                
+                if not instruction_text:
+                    instruction_text = description
+                
+                # Выполняем анализ контекста
+                context = await self._analyze_instruction_context(instruction_text, source_file)
+                
+                # Дополнительный анализ для таблиц
+                table_analysis = None
+                intelligent_table_analysis = None
+                
+                if context["element_type"] == "table_cell" and change.get("target", {}).get("text"):
+                    target_text = change["target"]["text"]
+                    table_analysis = await self._analyze_table_structure(source_file, target_text)
+                    
+                    # НОВЫЙ: Интеллектуальный анализ структуры таблицы
+                    intelligent_table_analysis = await self._intelligent_table_analysis(source_file, instruction_text)
+                    
+                    # Если найдено более полное содержимое ячейки, обновляем target.text
+                    if table_analysis["found"] and table_analysis["recommended_target_text"] != target_text:
+                        enhanced_change["target"]["text"] = table_analysis["recommended_target_text"]
+                        logger.warning(f"🔧 КОРРЕКЦИЯ TARGET.TEXT {change_id}: '{target_text}' → '{table_analysis['recommended_target_text']}'")
+                        corrections_made += 1
+                    
+                    # Добавляем информацию об интеллектуальном анализе
+                    if intelligent_table_analysis["is_table_change"]:
+                        enhanced_change["intelligent_table_analysis"] = intelligent_table_analysis
+                        logger.info(f"🧠 ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ {change_id}: тип таблицы = {intelligent_table_analysis['table_type']}")
+                        corrections_made += 1
+                
+                # НОВЫЙ: Интеллектуальный поиск для улучшения распознавания текста
+                elif context["element_type"] == "paragraph" and "слова" in description:
+                    intelligent_search = await self._intelligent_text_search(source_file, instruction_text)
+                    
+                    if intelligent_search["found"] and intelligent_search["target_text"] != enhanced_change.get("target", {}).get("text", ""):
+                        old_target = enhanced_change.get("target", {}).get("text", "")
+                        enhanced_change.setdefault("target", {})["text"] = intelligent_search["target_text"]
+                        enhanced_change["intelligent_search"] = intelligent_search
+                        
+                        logger.warning(f"🔍 ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК {change_id}: '{old_target}' → '{intelligent_search['target_text']}'")
+                        logger.info(f"   Найдено в: {intelligent_search['location']}")
+                        corrections_made += 1
+                
+                # Используем уже созданную копию изменения
+                original_operation = operation
+                
+                # Корректируем операцию на основе анализа контекста
+                if context["recommended_tool"] != operation.lower().replace("_", ""):
+                    # Маппинг MCP инструментов к операциям
+                    tool_to_operation = {
+                        "replace_text": "REPLACE_TEXT",
+                        "delete_paragraph": "DELETE_PARAGRAPH", 
+                        "add_paragraph": "ADD_PARAGRAPH",
+                        "add_heading": "ADD_HEADING",
+                        "add_table": "ADD_TABLE",
+                        "add_comment": "ADD_COMMENT"
+                    }
+                    
+                    recommended_operation = tool_to_operation.get(context["recommended_tool"], operation)
+                    
+                    if recommended_operation != operation:
+                        enhanced_change["operation"] = recommended_operation
+                        corrections_made += 1
+                        
+                        logger.warning(f"🔧 КОРРЕКЦИЯ {change_id}: {operation} → {recommended_operation}")
+                        logger.info(f"   Причина: {context['reasoning']}")
+                        logger.info(f"   Тип элемента: {context['element_type']}")
+                
+                # ДОПОЛНИТЕЛЬНАЯ КОРРЕКЦИЯ для частых ошибок
+                if operation == "REPLACE_POINT_TEXT":
+                    # Проверяем ключевые слова в описании
+                    correction_keywords = ["слова", "строку", "фразу", "в таблице", "аббревиатуру"]
+                    if any(keyword in description for keyword in correction_keywords):
+                        enhanced_change["operation"] = "REPLACE_TEXT"
+                        corrections_made += 1
+                        logger.warning(f"🔧 ДОПОЛНИТЕЛЬНАЯ КОРРЕКЦИЯ {change_id}: REPLACE_POINT_TEXT → REPLACE_TEXT (ключевые слова)")
+                    
+                    # Проверяем исходную инструкцию
+                    elif instruction_text and any(keyword in instruction_text.lower() for keyword in correction_keywords):
+                        enhanced_change["operation"] = "REPLACE_TEXT"
+                        corrections_made += 1
+                        logger.warning(f"🔧 ДОПОЛНИТЕЛЬНАЯ КОРРЕКЦИЯ {change_id}: REPLACE_POINT_TEXT → REPLACE_TEXT (анализ инструкции)")
+                
+                # Добавляем информацию о контексте в изменение
+                enhanced_change["context_analysis"] = {
+                    "element_type": context["element_type"],
+                    "recommended_tool": context["recommended_tool"],
+                    "reasoning": context["reasoning"]
+                }
+                
+                # Добавляем информацию о таблице, если есть
+                if table_analysis and table_analysis["found"]:
+                    enhanced_change["table_analysis"] = {
+                        "table_index": table_analysis["table_index"],
+                        "row_index": table_analysis["row_index"],
+                        "cell_index": table_analysis["cell_index"],
+                        "full_cell_content": table_analysis["full_cell_content"],
+                        "table_context": table_analysis["table_context"]
+                    }
+                
+                enhanced_changes.append(enhanced_change)
+                
+            except Exception as e:
+                logger.error(f"Ошибка анализа контекста для {change_id}: {e}")
+                enhanced_changes.append(change)  # Используем исходное изменение
+        
+        if corrections_made > 0:
+            logger.warning(f"🎯 ДВУХЭТАПНЫЙ АНАЛИЗ: Выполнено {corrections_made} коррекций операций")
+            logger.info("📋 ИТОГОВЫЕ ОПЕРАЦИИ ПОСЛЕ АНАЛИЗА КОНТЕКСТА:")
+            for change in enhanced_changes:
+                logger.info(f"  {change.get('change_id')}: {change.get('operation')} ({change.get('context_analysis', {}).get('element_type', 'unknown')})")
+        else:
+            logger.info("✅ ДВУХЭТАПНЫЙ АНАЛИЗ: Все операции корректны")
+        
+        return enhanced_changes, tokens_info
+
     async def _parse_changes_with_llm(
         self, 
         changes_text: str, 
@@ -232,9 +2671,13 @@ class DocumentChangeAgent:
                 f"Твоя задача - найти ВСЕ остальные изменения, которые могли быть пропущены.\n"
             )
         
-        # Загрузка system prompt из файла
+        # Загрузка system prompt из файла с добавлением описания MCP инструментов
         # Файл: /data/prompts/instruction_check_system.md (или backend/prompts/instruction_check_system.md)
         system_prompt = self._load_prompt("instruction_check_system.md")
+        
+        # Добавляем описание доступных MCP инструментов для лучшего выбора операций
+        mcp_tools_description = self._get_mcp_tools_description()
+        system_prompt += "\n\n" + mcp_tools_description
 
         # Загрузка user prompt из файла
         # Файл: /data/prompts/instruction_check_user.md (или backend/prompts/instruction_check_user.md)
@@ -302,6 +2745,8 @@ class DocumentChangeAgent:
         # Попытка парсинга JSON
         try:
             parsed = json.loads(content_cleaned)
+            # НОВАЯ ВАЛИДАЦИЯ JSON
+            parsed = self._validate_and_fix_json(parsed)
         except json.JSONDecodeError as e:
             # Логируем проблемный JSON для отладки
             error_pos = e.pos if hasattr(e, 'pos') else None
@@ -320,6 +2765,8 @@ class DocumentChangeAgent:
                 content_fixed = re.sub(r',\s*}', '}', content_cleaned)
                 content_fixed = re.sub(r',\s*]', ']', content_fixed)
                 parsed = json.loads(content_fixed)
+                # НОВАЯ ВАЛИДАЦИЯ JSON
+                parsed = self._validate_and_fix_json(parsed)
                 logger.info("JSON исправлен автоматически (удалены trailing commas)")
             except json.JSONDecodeError:
                 # Если не удалось исправить, пробуем извлечь JSON из текста
@@ -329,6 +2776,8 @@ class DocumentChangeAgent:
                     json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content_cleaned, re.DOTALL)
                     if json_match:
                         parsed = json.loads(json_match.group(0))
+                        # НОВАЯ ВАЛИДАЦИЯ JSON
+                        parsed = self._validate_and_fix_json(parsed)
                         logger.info("JSON извлечен из текста")
                     else:
                         raise RuntimeError(
@@ -351,6 +2800,9 @@ class DocumentChangeAgent:
                 f"LLM вернул некорректный формат: 'changes' должен быть массивом, "
                 f"получен: {type(changes).__name__}"
             )
+        
+        # ДОПОЛНИТЕЛЬНАЯ ВАЛИДАЦИЯ ОПЕРАЦИЙ
+        changes = self._validate_and_correct_operations(changes, changes_text)
         
         # Извлечение информации о токенах
         tokens_info = {
@@ -426,6 +2878,113 @@ class DocumentChangeAgent:
         logger.info(f"Использовано токенов: {tokens_info['total_tokens']} (prompt: {tokens_info['prompt_tokens']}, completion: {tokens_info['completion_tokens']})")
         return validated_changes, tokens_info
 
+    def _validate_and_correct_operations(self, changes: List[Dict[str, Any]], original_text: str) -> List[Dict[str, Any]]:
+        """
+        Валидация и автокоррекция неправильно выбранных операций LLM.
+        
+        Args:
+            changes: Список изменений от LLM
+            original_text: Исходный текст инструкций
+            
+        Returns:
+            Скорректированный список изменений
+        """
+        logger.info(f"🔍 НАЧАЛО ВАЛИДАЦИИ: получено {len(changes)} изменений")
+        corrected_changes = []
+        corrections_made = 0
+        
+        for change in changes:
+            operation = change.get("operation", "")
+            description = change.get("description", "").lower()
+            change_id = change.get("change_id", "")
+            
+            logger.info(f"🔍 ВАЛИДАЦИЯ {change_id}: operation={operation}, description='{description[:50]}...'")
+            
+            # Создаем копию изменения для модификации
+            corrected_change = change.copy()
+            original_operation = operation
+            
+            # ПРАВИЛА АВТОКОРРЕКЦИИ:
+            
+            # 1. Если в описании есть "слова", "строку", "фразу" - это REPLACE_TEXT
+            if operation == "REPLACE_POINT_TEXT":
+                keywords_for_replace_text = ["слова", "строку", "фразу", "текст", "аббревиатуру"]
+                if any(keyword in description for keyword in keywords_for_replace_text):
+                    corrected_change["operation"] = "REPLACE_TEXT"
+                    logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (найдено ключевое слово)")
+                    corrections_made += 1
+            
+            # 2. Если упоминается "в таблице" - это REPLACE_TEXT
+            if operation == "REPLACE_POINT_TEXT" and "в таблице" in description:
+                corrected_change["operation"] = "REPLACE_TEXT"
+                logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (таблица)")
+                corrections_made += 1
+            
+            # 3. Если упоминается "по всему тексту" - это REPLACE_TEXT с replace_all=true
+            if "по всему тексту" in description:
+                corrected_change["operation"] = "REPLACE_TEXT"
+                if "target" in corrected_change and isinstance(corrected_change["target"], dict):
+                    corrected_change["target"]["replace_all"] = True
+                logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: установлен replace_all=true (массовая замена)")
+                corrections_made += 1
+            
+            # 4. Проверяем исходный текст инструкций для дополнительной валидации
+            if change_id and original_text:
+                # Ищем соответствующую инструкцию в исходном тексте
+                lines = original_text.split('\n')
+                instruction_text = ""
+                
+                # Пробуем разные способы найти инструкцию
+                for line in lines:
+                    line_clean = line.strip().lower()
+                    # Ищем строку с номером изменения (1., 2., 3., 4.)
+                    if any(marker in line_clean for marker in [f"{change_id[-1]}.", f"{change_id[-1]} "]):
+                        instruction_text = line_clean
+                        break
+                
+                if instruction_text:
+                    # Дополнительная проверка по исходной инструкции
+                    if operation == "REPLACE_POINT_TEXT":
+                        correction_triggers = [
+                            "слова", "строку", "фразу", "в таблице", 
+                            "аббревиатуру", "по всему тексту"
+                        ]
+                        if any(trigger in instruction_text for trigger in correction_triggers):
+                            corrected_change["operation"] = "REPLACE_TEXT"
+                            logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (анализ исходной инструкции: '{instruction_text[:50]}...')")
+                            corrections_made += 1
+            
+            # 5. Специальные правила для конкретных паттернов
+            if operation == "REPLACE_POINT_TEXT":
+                # Если в описании упоминается конкретная замена текста
+                replace_patterns = ["изложить в следующей редакции", "заменить на", "изменить на"]
+                table_patterns = ["в таблице", "строку"]
+                
+                has_replace_pattern = any(pattern in description for pattern in replace_patterns)
+                has_table_pattern = any(pattern in description for pattern in table_patterns)
+                
+                if has_replace_pattern and has_table_pattern:
+                    corrected_change["operation"] = "REPLACE_TEXT"
+                    logger.warning(f"🔧 АВТОКОРРЕКЦИЯ {change_id}: {operation} → REPLACE_TEXT (паттерн замены в таблице)")
+                    corrections_made += 1
+            
+            # Логируем если операция была изменена
+            if corrected_change["operation"] != original_operation:
+                logger.info(f"✅ Операция скорректирована: {change_id} {original_operation} → {corrected_change['operation']}")
+            
+            corrected_changes.append(corrected_change)
+        
+        # Детальное логирование результатов валидации
+        if corrections_made > 0:
+            logger.warning(f"🔧 ВАЛИДАЦИЯ: Выполнено {corrections_made} автокоррекций операций")
+            logger.info("📋 ИТОГОВЫЕ ОПЕРАЦИИ ПОСЛЕ ВАЛИДАЦИИ:")
+            for change in corrected_changes:
+                logger.info(f"  {change.get('change_id')}: {change.get('operation')} - {change.get('description', '')[:60]}...")
+        else:
+            logger.info("✅ ВАЛИДАЦИЯ: Все операции корректны")
+        
+        return corrected_changes
+
     async def process_documents(
         self,
         source_file: str,
@@ -462,17 +3021,28 @@ class DocumentChangeAgent:
             backup_path = os.path.join(backup_dir, backup_filename)
 
             logger.info(f"Создание резервной копии: {backup_path}")
-            await mcp_client.copy_document(source_file, backup_path)
-            logger.info("Резервная копия создана успешно")
+            try:
+                await mcp_client.copy_document(source_file, backup_path)
+                logger.info("Резервная копия создана успешно")
+            except RuntimeError as e:
+                logger.warning(f"MCP сервер недоступен, используем локальное копирование: {e}")
+                import shutil
+                shutil.copy2(source_file, backup_path)
+                logger.info("Резервная копия создана локально")
 
             logger.info("Извлечение текста из файла с инструкциями")
-            changes_text = await mcp_client.get_document_text(changes_file)
+            changes_text = await self._safe_get_document_text(changes_file)
             logger.debug(f"Извлечено {len(changes_text)} символов инструкций")
             
-            # Распознавание изменений с помощью LLM
-            logger.info("Распознавание изменений с помощью LLM")
-            changes, tokens_info_parse = await self._parse_changes_with_llm(changes_text, initial_changes=[])
-            logger.info(f"LLM распознал {len(changes)} изменений")
+            # Простое распознавание изменений без двухэтапного анализа
+            logger.info("🚀 Запуск простого распознавания инструкций")
+            # Сохраняем исходный текст инструкций для исправления target.text
+            self._original_instructions_text = changes_text
+            changes, tokens_info_parse = await self._simple_parse_changes_with_llm(changes_text, initial_changes=[])
+            
+            # Сохраняем исходный порядок операций из файла инструкций
+            logger.info("📋 ПОРЯДОК ОПЕРАЦИЙ: Сохраняется исходный порядок из файла инструкций")
+            logger.info(f"🎯 Анализ завершен: {len(changes)} изменений")
             logger.info(f"Использовано токенов при парсинге: {tokens_info_parse.get('total_tokens', 0)}")
             
             # Нумерация изменений
@@ -545,6 +3115,28 @@ class DocumentChangeAgent:
 
             logger.info(f"Обработка завершена: успешно={successful}, ошибок={failed}")
 
+            # НОВАЯ ФУНКЦИЯ: Добавляем автоматические аннотации для отслеживания изменений
+            logger.info(f"🔍 ПРОВЕРКА АННОТАЦИЙ: successful={successful}, total_results={len(results)}")
+            
+            if successful > 0:
+                # Проверяем настройку для аннотаций (по умолчанию включено)
+                add_annotations = os.getenv("ADD_CHANGE_ANNOTATIONS", "true").lower() == "true"
+                logger.info(f"🔍 НАСТРОЙКА АННОТАЦИЙ: ADD_CHANGE_ANNOTATIONS={add_annotations}")
+                
+                if add_annotations:
+                    logger.info("📝 ДОБАВЛЕНИЕ АВТОМАТИЧЕСКИХ АННОТАЦИЙ")
+                    try:
+                        annotation_results = await self._add_change_annotations(source_file, results, session_id)
+                        logger.info(f"✅ Добавлено аннотаций: {annotation_results.get('annotations_added', 0)}")
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка добавления аннотаций: {e}")
+                        import traceback
+                        logger.error(f"Трассировка: {traceback.format_exc()}")
+                else:
+                    logger.info("📝 Автоматические аннотации отключены (ADD_CHANGE_ANNOTATIONS=false)")
+            else:
+                logger.info("📝 Аннотации не добавляются: нет успешных изменений")
+
             # Собираем информацию о токенах
             tokens_total = tokens_info_parse.get("total_tokens", 0)
             tokens_prompt = tokens_info_parse.get("prompt_tokens", 0)
@@ -601,12 +3193,22 @@ class DocumentChangeAgent:
         operation = change.get("operation", "").upper()
         description = change.get("description", "")
         
+        # Извлекаем target_text для аннотаций
+        target_text = ""
+        if "target" in change and isinstance(change["target"], dict):
+            target_text = change["target"].get("text", "")
+        elif "target_text" in change:
+            target_text = change["target_text"]
+        
         result: Dict[str, Any] = {
             "change_id": change_id,
             "operation": operation,
             "description": description,
             "status": "FAILED",
             "details": {},
+            "target_text": target_text,  # Сохраняем для аннотаций
+            "target": change.get("target", {}),  # Сохраняем весь объект target
+            "payload": change.get("payload", {}),  # Сохраняем payload для аннотаций
         }
 
         if operation not in self.SUPPORTED_OPERATIONS:
@@ -669,7 +3271,7 @@ class DocumentChangeAgent:
 
     async def _handle_replace_text(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Обработка замены текста с поддержкой массовых замен.
+        Обработка замены текста с поддержкой массовых замен и интеллектуальным анализом таблиц.
         """
         target = change.get("target", {})
         payload = change.get("payload", {})
@@ -685,25 +3287,40 @@ class DocumentChangeAgent:
                 "message": "Для REPLACE_TEXT необходимы target.text и payload.new_text",
             }
 
+        # ИНТЕЛЛЕКТУАЛЬНАЯ ЛОГИКА ДЛЯ ТАБЛИЦ: Прямой вызов для всех изменений в таблицах
+        description = change.get("description", "").lower()
+        is_table_change = "таблице" in description
+        
+        logger.info(f"🔍 ПРОВЕРКА ТАБЛИЦЫ: is_table_change={is_table_change}, description='{description[:50]}...'")
+        
+        if is_table_change:
+            logger.info("🧠 ОБНАРУЖЕНО ИЗМЕНЕНИЕ В ТАБЛИЦЕ - запуск интеллектуальной замены")
+            logger.info(f"   Target: '{target_text}', New: '{new_text}'")
+            
+            try:
+                # Интеллектуальная замена в таблице с анализом структуры
+                result = await self._intelligent_table_replacement(filename, target_text, new_text, description)
+                logger.info(f"🧠 РЕЗУЛЬТАТ интеллектуальной замены: {result.get('success', False)}")
+                if result["success"]:
+                    logger.info(f"✅ Интеллектуальная замена в таблице успешна")
+                    return result
+                else:
+                    logger.warning("⚠️ Интеллектуальная замена не удалась, используем стандартную логику")
+            except Exception as e:
+                logger.error(f"Ошибка интеллектуальной замены в таблице: {e}")
+                logger.info("Переключение на стандартную логику замены")
+
         # Нормализация текста для поиска (удаление лишних пробелов)
         normalized_target = " ".join(target_text.split())
         logger.debug(f"Поиск текста: '{normalized_target}' (оригинал: '{target_text}')")
         
         # Поиск всех вхождений
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            normalized_target,
-            match_case=match_case,
-        )
+        matches = await self._safe_find_text(filename, normalized_target, match_case)
         
         # Если не найдено с нормализованным текстом, пробуем оригинальный
         if not matches and normalized_target != target_text:
             logger.debug(f"Повторный поиск с оригинальным текстом: '{target_text}'")
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            target_text,
-            match_case=match_case,
-        )
+            matches = await self._safe_find_text(filename, target_text, match_case)
 
         if not matches:
             # Попытка найти похожий текст (для пунктов типа "36." или "36)")
@@ -711,11 +3328,7 @@ class DocumentChangeAgent:
                 # Пробуем найти пункт с разными форматами
                 for variant in [f"{target_text}.", f"{target_text})", f"{target_text}."]:
                     logger.debug(f"Попытка найти вариант: '{variant}'")
-                    variant_matches = await mcp_client.find_text_in_document(
-                        filename,
-                        variant,
-                        match_case=False,
-                    )
+                    variant_matches = await self._safe_find_text(filename, variant, match_case=False)
                     if variant_matches:
                         matches = variant_matches
                         logger.info(f"Найдено совпадение для варианта '{variant}'")
@@ -729,8 +3342,12 @@ class DocumentChangeAgent:
                     "message": f"Текст '{target_text}' не найден в документе. Попробуйте использовать более точный текст для поиска.",
                 }
 
-        # Для массовых замен или если найдено несколько вхождений
-        if replace_all or len(matches) > 1 or not match_case:
+        # ПРОВЕРКА ОБЛАСТИ ПРИМЕНЕНИЯ: локальные vs глобальные изменения
+        is_global_change = self._is_global_change(description)
+        logger.info(f"📍 Область применения: {'ГЛОБАЛЬНАЯ' if is_global_change else 'ЛОКАЛЬНАЯ'}")
+        
+        # Для массовых замен или глобальных изменений
+        if replace_all or is_global_change or (len(matches) > 1 and is_global_change):
             # Обрабатываем все вхождения
             doc = Document(filename)
             replaced_count = 0
@@ -742,31 +3359,49 @@ class DocumentChangeAgent:
                     replaced_count += 1
                     affected_paragraphs.add(idx)
 
+            # УЛУЧШЕНИЕ: Также проверяем таблицы для замен
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if self._replace_in_cell(cell, target_text, new_text):
+                            replaced_count += 1
+
             if replaced_count == 0:
                 return {
                     "success": False,
                     "error": "TEXT_NOT_FOUND_IN_PARAGRAPH",
-                    "message": f"Не удалось заменить '{target_text}' в документе",
+                    "message": f"Не удалось заменить '{target_text}' в документе (проверены параграфы и таблицы)",
                 }
 
             doc.save(filename)
 
             # Добавляем аннотацию к первому затронутому параграфу
-        if change.get("annotation", True) and affected_paragraphs:
-            # Добавляем аннотации к каждому измененному параграфу, а не только к первому
-            for para_idx in affected_paragraphs:
-                await self._add_annotation(
-                    filename,
-                    para_idx,
-                    change,
-                    extra=f'"{target_text}" → "{new_text}"',
-                )
+            if change.get("annotation", True) and affected_paragraphs:
+                # Добавляем аннотации к каждому измененному параграфу, а не только к первому
+                for para_idx in affected_paragraphs:
+                    await self._add_annotation(
+                        filename,
+                        para_idx,
+                        change,
+                        extra=f'"{target_text}" → "{new_text}"',
+                    )
 
             return {
                 "success": True,
                 "replacements_count": replaced_count,
                 "affected_paragraphs": sorted(affected_paragraphs),
             }
+
+        # ИНТЕЛЛЕКТУАЛЬНАЯ ЗАМЕНА В ПАРАГРАФАХ: Проверяем, не является ли это заменой в пункте
+        if "пункте" in description and len(matches) >= 1:
+            logger.info("📋 ОБНАРУЖЕНО ИЗМЕНЕНИЕ В ПУНКТЕ - используем интеллектуальный поиск")
+            
+            # Ищем правильный параграф и заменяем только нужную часть
+            result = await self._intelligent_paragraph_replacement(filename, target_text, new_text, description, matches)
+            if result["success"]:
+                return result
+            else:
+                logger.warning("⚠️ Интеллектуальная замена в пункте не удалась, используем стандартную логику")
 
         # Для единичной замены (точное совпадение)
         if len(matches) != 1:
@@ -815,6 +3450,2144 @@ class DocumentChangeAgent:
 
         return {"success": True, "paragraph_index": paragraph_index}
 
+    async def _intelligent_table_replacement(self, filename: str, target_text: str, new_text: str, description: str) -> Dict[str, Any]:
+        """
+        УЛУЧШЕННАЯ интеллектуальная замена в таблице:
+        1. Находит строку с target_text
+        2. Анализирует структуру строки (количество столбцов, содержимое)
+        3. Сопоставляет новый текст с существующей структурой
+        4. Правильно распределяет по столбцам
+        
+        Args:
+            filename: Путь к файлу
+            target_text: Искомый текст (например, "ДРМ")
+            new_text: Новый текст (например, "ДКР Департамент кредитных рисков")
+            description: Описание инструкции
+            
+        Returns:
+            Результат операции
+        """
+        logger.info(f"🧠 УЛУЧШЕННАЯ ИНТЕЛЛЕКТУАЛЬНАЯ ЗАМЕНА В ТАБЛИЦЕ:")
+        logger.info(f"   Ищем строку с: '{target_text}'")
+        logger.info(f"   Новое содержимое: '{new_text}'")
+        logger.info(f"   Описание: '{description}'")
+        
+        try:
+            # Открываем документ для анализа
+            doc = Document(filename)
+            replacements_made = 0
+            
+            # Извлекаем название таблицы из описания (если указано)
+            table_name = None
+            if "таблице" in description.lower():
+                import re
+                # Ищем паттерн "в таблице «название»"
+                match = re.search(r'таблице\s*[«"](.*?)[»"]', description, re.IGNORECASE)
+                if match:
+                    table_name = match.group(1).strip()
+                    logger.info(f"📋 Ограничение поиска таблицей: '{table_name}'")
+            
+            # ИНТЕЛЛЕКТУАЛЬНОЕ ОПРЕДЕЛЕНИЕ ЦЕЛЕВОЙ ТАБЛИЦЫ ЧЕРЕЗ LLM
+            llm_target_table_indices = None
+            try:
+                llm_target_table_indices = await self._identify_target_table_with_llm(
+                    doc=doc,
+                    description=description,
+                    target_text=target_text,
+                    table_name=table_name
+                )
+                if llm_target_table_indices:
+                    logger.info(f"   🎯 LLM определил целевые таблицы: {llm_target_table_indices}")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Ошибка при LLM определении таблицы, продолжаем с алгоритмическим подходом: {e}")
+            
+            # Если указано название таблицы, сначала ищем его в тексте документа
+            table_name_found_in_text = False
+            if table_name:
+                logger.info(f"🔍 Поиск названия таблицы '{table_name}' в тексте документа...")
+                try:
+                    # Ищем название таблицы в тексте через MCP
+                    matches = await mcp_client.find_text_in_document(filename, table_name, match_case=False)
+                    if matches:
+                        logger.info(f"   ✅ Найдено {len(matches)} упоминаний названия таблицы в тексте")
+                        table_name_found_in_text = True
+                        logger.info(f"   📍 Название найдено в тексте, ограничиваем поиск таблицами с target_text")
+                    else:
+                        logger.info(f"   ⚠️ Название таблицы не найдено в тексте, используем проверку заголовка")
+                    
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Ошибка при поиске названия таблицы в тексте: {e}")
+                    # Продолжаем без ограничения
+            
+            # Ищем таблицы и анализируем их структуру
+            # Если LLM определил целевые таблицы, используем их как приоритет
+            # Если название найдено в тексте, обрабатываем только первую таблицу с target_text
+            first_table_processed = False
+            table_location = None  # Информация о местоположении замены для аннотаций
+            
+            for table_idx, table in enumerate(doc.tables):
+                logger.info(f"📊 Анализ таблицы {table_idx}")
+                
+                should_process_this_table = True
+                
+                # ПРИОРИТЕТ 1: Если LLM определил целевые таблицы, обрабатываем только их
+                if llm_target_table_indices is not None:
+                    if table_idx not in llm_target_table_indices:
+                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не определена LLM как целевая)")
+                        continue
+                    else:
+                        logger.info(f"   ✅ Таблица {table_idx} определена LLM как целевая")
+                
+                # ПРИОРИТЕТ 2: Проверяем название таблицы (если указано и LLM не определил таблицы)
+                # Если LLM определил таблицы, используем их и пропускаем проверку по названию
+                if table_name and llm_target_table_indices is None:
+                    # Если название найдено в тексте, проверяем только первую таблицу, которая содержит target_text
+                    if table_name_found_in_text:
+                        # Если уже обработали первую таблицу, пропускаем остальные
+                        if first_table_processed:
+                            logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (уже обработана первая таблица с названием)")
+                            continue
+                        
+                        # Проверяем, содержит ли эта таблица target_text
+                        table_contains_target = False
+                        for row in table.rows:
+                            for cell in row.cells:
+                                if target_text in cell.text:
+                                    table_contains_target = True
+                                    break
+                            if table_contains_target:
+                                break
+                        
+                        if not table_contains_target:
+                            logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не содержит target_text '{target_text}')")
+                            should_process_this_table = False
+                        else:
+                            logger.info(f"   ✅ Таблица {table_idx} содержит target_text и идет после названия в тексте")
+                            # first_table_processed будет установлен после успешной замены
+                    
+                    # Если не нашли через поиск в тексте, проверяем заголовок таблицы
+                    if not table_name_found_in_text and should_process_this_table:
+                        # Проверяем заголовок таблицы (первые 3 строки для более надежного поиска)
+                        table_header = ""
+                        for i, row in enumerate(table.rows[:3]):
+                            for cell in row.cells:
+                                table_header += cell.text + " "
+                        table_header = table_header.strip().lower()
+                        table_name_lower = table_name.lower()
+                        
+                        # Гибкая проверка: ищем ключевые слова из названия таблицы
+                        # Разбиваем название на слова и проверяем, что хотя бы 2-3 ключевых слова присутствуют
+                        import re
+                        # Убираем служебные слова
+                        stop_words = {'и', 'в', 'на', 'с', 'по', 'для', 'от', 'до', 'из', 'к', 'о', 'об', 'обо', 'со', 'во'}
+                        table_name_words = [w for w in re.findall(r'\b\w+\b', table_name_lower) if w not in stop_words and len(w) > 2]
+                        
+                        # Проверяем совпадение ключевых слов
+                        matched_words = [word for word in table_name_words if word in table_header]
+                        match_ratio = len(matched_words) / len(table_name_words) if table_name_words else 0
+                        
+                        # Также проверяем точное совпадение (на случай коротких названий)
+                        exact_match = table_name_lower in table_header
+                        
+                        # Принимаем таблицу, если:
+                        # 1. Точное совпадение ИЛИ
+                        # 2. Совпало больше половины ключевых слов (минимум 2 слова)
+                        if not exact_match and (match_ratio < 0.5 or len(matched_words) < 2):
+                            logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не соответствует названию '{table_name}')")
+                            logger.info(f"      Заголовок: '{table_header[:100]}...'")
+                            logger.info(f"      Совпало слов: {len(matched_words)}/{len(table_name_words)} ({matched_words})")
+                            continue
+                        else:
+                            logger.info(f"   ✅ Таблица {table_idx} соответствует названию '{table_name}'")
+                            logger.info(f"      Совпало слов: {len(matched_words)}/{len(table_name_words)} ({matched_words})")
+                    else:
+                        logger.info(f"   ✅ Таблица {table_idx} - целевая таблица (найдена через поиск в тексте)")
+                
+                # Пропускаем таблицу, если она не должна обрабатываться
+                if not should_process_this_table:
+                    continue
+                
+                # Если LLM определил эту таблицу как целевую, проверяем наличие target_text
+                if llm_target_table_indices and table_idx in llm_target_table_indices:
+                    table_contains_target = False
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if target_text in cell.text:
+                                table_contains_target = True
+                                break
+                        if table_contains_target:
+                            break
+                    
+                    if not table_contains_target:
+                        logger.warning(f"   ⚠️ Таблица {table_idx} определена LLM как целевая, но не содержит target_text '{target_text}'")
+                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx}")
+                        continue
+                    else:
+                        logger.info(f"   ✅ Таблица {table_idx} определена LLM как целевая и содержит target_text")
+                
+                for row_idx, row in enumerate(table.rows):
+                    # 1. НАХОДИМ СТРОКУ с target_text
+                    target_found = False
+                    target_cell_idx = -1
+                    for cell_idx, cell in enumerate(row.cells):
+                        if target_text in cell.text:
+                            target_found = True
+                            target_cell_idx = cell_idx
+                            logger.info(f"   ✅ Найдена строка {row_idx} с '{target_text}' в ячейке {cell_idx}")
+                            break
+                    
+                    if target_found:
+                        # 2. АНАЛИЗИРУЕМ СТРУКТУРУ СТРОКИ
+                        row_structure = self._analyze_row_structure(row, row_idx)
+                        logger.info(f"   📋 Структура строки: {row_structure}")
+                        
+                        # 2.1. ПОЛУЧАЕМ КОНТЕКСТ ТАБЛИЦЫ (для LLM)
+                        table_context = self._get_table_context(table, row_idx)
+                        
+                        # 3. СОПОСТАВЛЯЕМ НОВЫЙ ТЕКСТ СО СТРУКТУРОЙ (алгоритм + LLM проверка)
+                        distribution = await self._map_new_text_to_structure(
+                            new_text=new_text,
+                            target_text=target_text,
+                            row_structure=row_structure,
+                            description=description,
+                            table_context=table_context
+                        )
+                        logger.info(f"   🎯 Распределение по столбцам: {distribution}")
+                        
+                        # 4. ПРИМЕНЯЕМ ИЗМЕНЕНИЯ ПО СТОЛБЦАМ
+                        if self._apply_structured_replacement(row, target_text, distribution):
+                            replacements_made += 1
+                            logger.info(f"   ✅ Структурированная замена в строке {row_idx}")
+                            
+                            # Сохраняем информацию о местоположении замены для аннотаций
+                            # Ищем параграф, соответствующий этой таблице
+                            if table_location is None:  # Сохраняем только информацию о первой замене
+                                table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                if table_paragraph_index >= 0:
+                                    table_location = {
+                                        "table_idx": table_idx,
+                                        "row_idx": row_idx,
+                                        "cell_idx": target_cell_idx,
+                                        "paragraph_index": table_paragraph_index
+                                    }
+                                    logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {row_idx}, Para {table_paragraph_index}")
+                            
+                            # Если LLM определил точечное изменение в конкретной таблице, завершаем после первой замены
+                            if llm_target_table_indices and len(llm_target_table_indices) == 1:
+                                logger.info(f"   ✅ Точечное изменение выполнено в целевой таблице {table_idx}, завершаем обработку")
+                                first_table_processed = True
+                                # Выходим из цикла по строкам
+                                break
+                            # Если название найдено в тексте, обрабатываем только первую найденную строку
+                            elif table_name_found_in_text:
+                                logger.info(f"   ✅ Найдена целевая таблица с названием в тексте, завершаем обработку")
+                                # Устанавливаем флаг, что первая таблица обработана
+                                first_table_processed = True
+                                # Выходим из цикла по строкам
+                                break
+                
+                # Выходим из цикла по таблицам, если уже сделали замену и:
+                # - LLM определил точечное изменение (одна таблица), или
+                # - название найдено в тексте
+                if (llm_target_table_indices and len(llm_target_table_indices) == 1 and first_table_processed) or (table_name_found_in_text and first_table_processed):
+                    if llm_target_table_indices and len(llm_target_table_indices) == 1:
+                        logger.info(f"   ✅ Завершаем обработку таблиц (точечное изменение в таблице {llm_target_table_indices[0]} выполнено)")
+                    elif table_name_found_in_text:
+                        logger.info(f"   ✅ Завершаем обработку таблиц (найдена целевая таблица с названием и выполнена замена)")
+                    break
+            
+            if replacements_made > 0:
+                doc.save(filename)
+                result = {
+                    "success": True,
+                    "message": f"Структурированная замена выполнена в {replacements_made} строках",
+                    "replacements_made": replacements_made,
+                    "method": "structured_table_replace",
+                    "is_table_change": True,  # Флаг, что изменение было в таблице
+                }
+                # Добавляем информацию о местоположении для аннотаций
+                if table_location:
+                    result["table_location"] = table_location
+                    result["paragraph_index"] = table_location.get("paragraph_index", -1)
+                return result
+            else:
+                return {
+                    "success": False,
+                    "error": "NO_REPLACEMENTS",
+                    "message": f"Строка с '{target_text}' не найдена в таблицах"
+                }
+                
+        except Exception as e:
+            logger.error(f"Ошибка структурированной замены в таблице: {e}")
+            return {
+                "success": False,
+                "error": "STRUCTURED_REPLACE_ERROR",
+                "message": f"Ошибка структурированной замены: {e}"
+            }
+
+    def _get_text_before_table(self, doc: Document, table_idx: int, max_paragraphs: int = 3) -> str:
+        """
+        Получает текст параграфов перед указанной таблицей (для поиска названия таблицы).
+        
+        Args:
+            doc: Документ
+            table_idx: Индекс таблицы в документе
+            max_paragraphs: Максимальное количество параграфов перед таблицей для анализа
+            
+        Returns:
+            Текст параграфов перед таблицей
+        """
+        try:
+            table_count = 0
+            para_count = 0
+            paragraphs_before = []
+            
+            # Проходим по элементам документа
+            for i, element in enumerate(doc.element.body):
+                if element.tag.endswith('p'):  # Параграф
+                    para_count += 1
+                elif element.tag.endswith('tbl'):  # Таблица
+                    if table_count == table_idx:
+                        # Нашли нужную таблицу, собираем параграфы перед ней
+                        # Ищем параграфы перед этим элементом (до max_paragraphs)
+                        found_paragraphs = 0
+                        for j in range(i - 1, -1, -1):
+                            if doc.element.body[j].tag.endswith('p'):
+                                # Получаем текст параграфа
+                                para_element = doc.element.body[j]
+                                para_text = ""
+                                for t in para_element.iter():
+                                    if t.text:
+                                        para_text += t.text
+                                
+                                if para_text.strip():
+                                    paragraphs_before.insert(0, para_text.strip())
+                                    found_paragraphs += 1
+                                    if found_paragraphs >= max_paragraphs:
+                                        break
+                        break
+                    table_count += 1
+            
+            # Объединяем параграфы в один текст
+            text_before = "\n".join(paragraphs_before)
+            return text_before
+            
+        except Exception as e:
+            logger.warning(f"Ошибка получения текста перед таблицей {table_idx}: {e}")
+            return ""
+    
+    def _find_paragraph_for_table(self, doc: Document, table_idx: int) -> int:
+        """
+        Находит индекс параграфа, соответствующего указанной таблице.
+        
+        Args:
+            doc: Документ
+            table_idx: Индекс таблицы в документе
+            
+        Returns:
+            Индекс параграфа, который находится перед таблицей или связан с ней,
+            или -1 если не найден
+        """
+        try:
+            table_count = 0
+            para_count = 0
+            
+            # Проходим по элементам документа
+            for i, element in enumerate(doc.element.body):
+                if element.tag.endswith('p'):  # Параграф
+                    para_count += 1
+                elif element.tag.endswith('tbl'):  # Таблица
+                    if table_count == table_idx:
+                        # Нашли нужную таблицу, ищем параграф перед ней
+                        # Ищем параграф перед этим элементом
+                        for j in range(i - 1, -1, -1):
+                            if doc.element.body[j].tag.endswith('p'):
+                                # Подсчитываем индекс параграфа (сколько параграфов до этого элемента)
+                                para_idx = sum(1 for k in range(j + 1) if doc.element.body[k].tag.endswith('p')) - 1
+                                logger.info(f"   📍 Найден параграф {para_idx} перед таблицей {table_idx}")
+                                return para_idx
+                        # Если не нашли параграф перед таблицей, возвращаем текущий счетчик
+                        logger.warning(f"   ⚠️ Параграф перед таблицей {table_idx} не найден, используем {para_count - 1}")
+                        return max(0, para_count - 1)
+                    table_count += 1
+            
+            # Если не нашли таблицу, возвращаем последний известный индекс
+            logger.warning(f"   ⚠️ Таблица {table_idx} не найдена, используем {para_count - 1}")
+            return max(0, para_count - 1)
+        except Exception as e:
+            logger.error(f"Ошибка поиска параграфа для таблицы {table_idx}: {e}")
+            return -1
+
+    def _analyze_new_text_for_table(self, new_text: str, target_text: str) -> Dict[str, str]:
+        """
+        Анализирует новый текст и разделяет его на части для столбцов таблицы.
+        
+        Args:
+            new_text: Новый текст (например, "ДКР Департамент кредитных рисков")
+            target_text: Исходный текст (например, "ДРМ")
+            
+        Returns:
+            Словарь с частями текста для разных столбцов
+        """
+        parts = {
+            "abbreviation": "",
+            "description": "",
+            "full_text": new_text
+        }
+        
+        # Разделяем текст на аббревиатуру и описание
+        words = new_text.split()
+        if len(words) >= 2:
+            # Первое слово - аббревиатура
+            first_word = words[0]
+            if len(first_word) <= 5 and first_word.isupper():
+                parts["abbreviation"] = first_word
+                parts["description"] = " ".join(words[1:])
+            else:
+                # Если первое слово не похоже на аббревиатуру, используем исходный target_text
+                parts["abbreviation"] = target_text
+                parts["description"] = new_text
+        else:
+            # Если только одно слово, используем его как аббревиатуру
+            parts["abbreviation"] = new_text
+            parts["description"] = ""
+        
+        logger.info(f"🔍 Анализ нового текста:")
+        logger.info(f"   Аббревиатура: '{parts['abbreviation']}'")
+        logger.info(f"   Описание: '{parts['description']}'")
+        
+        return parts
+
+    def _replace_intelligently_in_row(self, row, target_text: str, parts: Dict[str, str], target_cell_idx: int) -> bool:
+        """
+        Интеллектуально заменяет текст в строке таблицы, распределяя по столбцам.
+        
+        Args:
+            row: Строка таблицы
+            target_text: Искомый текст
+            parts: Части нового текста для разных столбцов
+            target_cell_idx: Индекс ячейки, где найден target_text
+            
+        Returns:
+            True если замена была выполнена
+        """
+        replaced = False
+        
+        try:
+            # Определяем количество столбцов
+            num_columns = len(row.cells)
+            logger.info(f"   Строка имеет {num_columns} столбцов")
+            
+            if num_columns >= 2:
+                # Для таблиц с 2+ столбцами: первый - аббревиатура, второй - описание
+                
+                # Заменяем в первом столбце (аббревиатура)
+                first_cell = row.cells[0]
+                if target_text in first_cell.text and parts["abbreviation"]:
+                    logger.info(f"   Замена в столбце 0: '{target_text}' → '{parts['abbreviation']}'")
+                    if self._replace_in_cell(first_cell, target_text, parts["abbreviation"]):
+                        replaced = True
+                
+                # Заменяем во втором столбце (описание), если есть
+                if num_columns > 1 and parts["description"]:
+                    second_cell = row.cells[1]
+                    # Ищем старое описание или добавляем новое
+                    if target_text in second_cell.text:
+                        logger.info(f"   Замена в столбце 1: '{target_text}' → '{parts['description']}'")
+                        if self._replace_in_cell(second_cell, target_text, parts["description"]):
+                            replaced = True
+                    else:
+                        # Если во втором столбце нет target_text, но есть описание связанное с аббревиатурой
+                        old_description = second_cell.text.strip()
+                        if old_description and parts["abbreviation"] in first_cell.text:
+                            # Заменяем все содержимое второго столбца
+                            logger.info(f"   Полная замена описания в столбце 1: '{old_description}' → '{parts['description']}'")
+                            second_cell.text = parts["description"]
+                            replaced = True
+            else:
+                # Для таблиц с 1 столбцом: заменяем полным текстом
+                if self._replace_in_cell(row.cells[0], target_text, parts["full_text"]):
+                    replaced = True
+                    
+        except Exception as e:
+            logger.error(f"Ошибка интеллектуальной замены в строке: {e}")
+        
+        return replaced
+
+    def _is_global_change(self, description: str) -> bool:
+        """
+        Определяет, является ли изменение глобальным (по всему документу) или локальным.
+        
+        Args:
+            description: Описание инструкции
+            
+        Returns:
+            True если изменение глобальное
+        """
+        description_lower = description.lower()
+        
+        # Ключевые фразы для глобальных изменений
+        global_keywords = [
+            "по всему тексту",
+            "по всему документу", 
+            "во всем документе",
+            "везде в документе",
+            "по всему файлу",
+            "глобально заменить",
+            "массовая замена"
+        ]
+        
+        # Ключевые фразы для локальных изменений
+        local_keywords = [
+            "в пункте",
+            "в разделе",
+            "в таблице",
+            "в строке",
+            "в параграфе",
+            "в части",
+            "в главе"
+        ]
+        
+        # Проверяем на глобальные ключевые слова
+        for keyword in global_keywords:
+            if keyword in description_lower:
+                logger.info(f"   🌍 Обнаружено глобальное изменение: '{keyword}'")
+                return True
+        
+        # Проверяем на локальные ключевые слова
+        for keyword in local_keywords:
+            if keyword in description_lower:
+                logger.info(f"   📍 Обнаружено локальное изменение: '{keyword}'")
+                return False
+        
+        # По умолчанию считаем изменение локальным
+        logger.info(f"   📍 По умолчанию: локальное изменение")
+        return False
+
+    def _analyze_row_structure(self, row, row_idx: int) -> Dict[str, Any]:
+        """
+        Детальный анализ структуры строки таблицы.
+        
+        Args:
+            row: Строка таблицы
+            row_idx: Индекс строки
+            
+        Returns:
+            Структура строки с информацией о столбцах
+        """
+        structure = {
+            "row_index": row_idx,
+            "columns_count": len(row.cells),
+            "columns": [],
+            "table_type": "unknown"
+        }
+        
+        # Анализируем каждый столбец
+        for col_idx, cell in enumerate(row.cells):
+            cell_text = cell.text.strip()
+            column_info = {
+                "index": col_idx,
+                "content": cell_text,
+                "type": self._determine_column_type_enhanced(cell_text, col_idx),
+                "length": len(cell_text)
+            }
+            structure["columns"].append(column_info)
+        
+        # Определяем тип таблицы на основе структуры
+        structure["table_type"] = self._determine_table_type(structure["columns"])
+        
+        logger.info(f"   📋 Анализ строки {row_idx}:")
+        for col in structure["columns"]:
+            logger.info(f"      Столбец {col['index']}: '{col['content'][:20]}...' (тип: {col['type']})")
+        
+        return structure
+    
+    def _determine_column_type_enhanced(self, content: str, col_index: int) -> str:
+        """
+        Улучшенное определение типа столбца на основе содержимого.
+        
+        Args:
+            content: Содержимое ячейки
+            col_index: Индекс столбца
+            
+        Returns:
+            Тип столбца
+        """
+        import re
+        
+        if not content:
+            return "empty"
+        
+        # Аббревиатуры (короткие заглавные буквы)
+        if re.match(r'^[А-ЯЁ]{2,6}$', content):
+            return "abbreviation"
+        
+        # Номера или коды
+        if re.match(r'^\d+\.?\d*$', content):
+            return "number"
+        
+        # Длинные описания
+        if len(content) > 15 and ' ' in content:
+            return "description"
+        
+        # Короткие ключи
+        if len(content) <= 10:
+            return "key"
+        
+        # По позиции столбца
+        if col_index == 0:
+            return "primary_key"
+        elif col_index == 1:
+            return "secondary_info"
+        else:
+            return "additional_info"
+    
+    def _determine_table_type(self, columns: List[Dict]) -> str:
+        """
+        Определяет тип таблицы на основе анализа столбцов.
+        
+        Args:
+            columns: Информация о столбцах
+            
+        Returns:
+            Тип таблицы
+        """
+        if len(columns) >= 2:
+            first_col_type = columns[0]["type"]
+            second_col_type = columns[1]["type"]
+            
+            if first_col_type == "abbreviation" and second_col_type == "description":
+                return "abbreviations_table"
+            elif first_col_type == "number" and second_col_type == "description":
+                return "numbered_list"
+            elif first_col_type == "key" and second_col_type in ["description", "secondary_info"]:
+                return "key_value_table"
+        
+        return "general_table"
+    
+    async def _map_new_text_to_structure(
+        self, 
+        new_text: str, 
+        target_text: str, 
+        row_structure: Dict,
+        description: str = "",
+        table_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Сопоставляет новый текст со структурой строки таблицы.
+        Использует алгоритмический подход + LLM для проверки и корректировки.
+        
+        Args:
+            new_text: Новый текст для распределения
+            target_text: Исходный текст для замены
+            row_structure: Структура строки
+            description: Описание инструкции (для контекста LLM)
+            table_context: Контекст таблицы (заголовки, соседние строки)
+            
+        Returns:
+            Распределение текста по столбцам
+        """
+        # 1. АЛГОРИТМИЧЕСКОЕ РАСПРЕДЕЛЕНИЕ (основной подход)
+        distribution = {
+            "columns_mapping": {},
+            "strategy": "auto"
+        }
+        
+        table_type = row_structure.get("table_type", "general_table")
+        columns = row_structure.get("columns", [])
+        
+        logger.info(f"   🎯 Сопоставление для типа таблицы: {table_type}")
+        
+        if table_type == "abbreviations_table" and len(columns) >= 2:
+            # Для таблиц сокращений: разделяем на аббревиатуру и описание
+            parts = self._split_abbreviation_text(new_text, target_text)
+            
+            # Первый столбец - аббревиатура
+            if columns[0]["type"] in ["abbreviation", "primary_key"]:
+                distribution["columns_mapping"][0] = parts["abbreviation"]
+            
+            # Второй столбец - описание
+            if len(columns) > 1 and columns[1]["type"] in ["description", "secondary_info"]:
+                distribution["columns_mapping"][1] = parts["description"]
+                
+            distribution["strategy"] = "abbreviation_split"
+            
+        elif table_type == "key_value_table" and len(columns) >= 2:
+            # Для таблиц ключ-значение
+            parts = self._split_key_value_text(new_text, target_text)
+            distribution["columns_mapping"][0] = parts["key"]
+            if len(columns) > 1:
+                distribution["columns_mapping"][1] = parts["value"]
+            distribution["strategy"] = "key_value_split"
+            
+        else:
+            # Для общих таблиц - равномерное распределение
+            parts = self._split_general_text(new_text, len(columns))
+            for i, part in enumerate(parts):
+                if i < len(columns):
+                    distribution["columns_mapping"][i] = part
+            distribution["strategy"] = "general_split"
+        
+        logger.info(f"   📝 Алгоритмическая стратегия: {distribution['strategy']}")
+        for col_idx, content in distribution["columns_mapping"].items():
+            logger.info(f"      Столбец {col_idx}: '{content}'")
+        
+        # 2. ПРОВЕРКА И КОРРЕКТИРОВКА ЧЕРЕЗ LLM
+        try:
+            llm_distribution = await self._map_text_with_llm(
+                new_text=new_text,
+                target_text=target_text,
+                row_structure=row_structure,
+                algorithmic_distribution=distribution,
+                description=description,
+                table_context=table_context
+            )
+            
+            if llm_distribution and llm_distribution.get("confidence", 0) >= 0.7:
+                logger.info(f"   ✅ LLM корректировка применена (уверенность: {llm_distribution.get('confidence', 0):.2f})")
+                distribution = llm_distribution.get("distribution", distribution)
+                distribution["strategy"] = distribution.get("strategy", "llm_corrected")
+                distribution["llm_corrected"] = True
+                distribution["llm_reasoning"] = llm_distribution.get("reasoning", "")
+            else:
+                logger.info(f"   ⚠️ LLM корректировка не применена (низкая уверенность или ошибка), используется алгоритмический результат")
+                distribution["llm_corrected"] = False
+                
+        except Exception as e:
+            logger.warning(f"   ⚠️ Ошибка при LLM проверке, используется алгоритмический результат: {e}")
+            distribution["llm_corrected"] = False
+            distribution["llm_error"] = str(e)
+        
+        return distribution
+    
+    def _split_abbreviation_text(self, text: str, target_text: str) -> Dict[str, str]:
+        """Разделяет текст на аббревиатуру и описание."""
+        words = text.split()
+        if len(words) >= 2:
+            first_word = words[0]
+            if len(first_word) <= 6 and first_word.isupper():
+                return {
+                    "abbreviation": first_word,
+                    "description": " ".join(words[1:])
+                }
+        
+        # Если не удалось разделить, используем target_text как аббревиатуру
+        return {
+            "abbreviation": target_text,
+            "description": text
+        }
+    
+    def _split_key_value_text(self, text: str, target_text: str) -> Dict[str, str]:
+        """Разделяет текст на ключ и значение."""
+        # Простое разделение по первому пробелу или двоеточию
+        if ':' in text:
+            parts = text.split(':', 1)
+            return {"key": parts[0].strip(), "value": parts[1].strip()}
+        elif ' ' in text:
+            parts = text.split(' ', 1)
+            return {"key": parts[0].strip(), "value": parts[1].strip()}
+        else:
+            return {"key": text, "value": ""}
+    
+    def _split_general_text(self, text: str, num_columns: int) -> List[str]:
+        """Разделяет текст на части для общих таблиц."""
+        if num_columns <= 1:
+            return [text]
+        
+        words = text.split()
+        if len(words) <= num_columns:
+            # Если слов меньше или равно количеству столбцов
+            result = words + [""] * (num_columns - len(words))
+            return result[:num_columns]
+        else:
+            # Распределяем слова по столбцам
+            words_per_col = len(words) // num_columns
+            result = []
+            for i in range(num_columns):
+                start_idx = i * words_per_col
+                if i == num_columns - 1:  # Последний столбец получает оставшиеся слова
+                    end_idx = len(words)
+                else:
+                    end_idx = (i + 1) * words_per_col
+                result.append(" ".join(words[start_idx:end_idx]))
+            return result
+    
+    async def _identify_target_table_with_llm(
+        self,
+        doc: Document,
+        description: str,
+        target_text: str,
+        table_name: Optional[str] = None
+    ) -> Optional[List[int]]:
+        """
+        Использует LLM для точного определения целевой таблицы на основе семантического анализа.
+        
+        Args:
+            doc: Документ python-docx
+            description: Описание инструкции
+            target_text: Искомый текст
+            table_name: Название таблицы (если указано в инструкции)
+            
+        Returns:
+            Список индексов целевых таблиц, или None при ошибке
+        """
+        if not self.openai_client:
+            logger.warning("LLM клиент не инициализирован, пропускаем интеллектуальное определение таблицы")
+            return None
+        
+        if not doc.tables:
+            logger.info("В документе нет таблиц")
+            return None
+        
+        try:
+            # Подготовка информации о всех таблицах
+            tables_info = []
+            for table_idx, table in enumerate(doc.tables):
+                # Получаем заголовки таблицы (первые 2 строки)
+                headers = []
+                for i in range(min(2, len(table.rows))):
+                    header_row = []
+                    for cell in table.rows[i].cells:
+                        header_row.append(cell.text.strip()[:100])  # Ограничиваем длину
+                    headers.append(" | ".join(header_row))
+                
+                # Получаем текст перед таблицей (для поиска названия)
+                text_before_table = self._get_text_before_table(doc, table_idx, max_paragraphs=3)
+                
+                # Получаем структуру таблицы
+                num_rows = len(table.rows)
+                num_cols = len(table.rows[0].cells) if table.rows else 0
+                
+                # Проверяем наличие target_text
+                contains_target = False
+                target_cells_info = []
+                for row_idx, row in enumerate(table.rows[:5]):  # Проверяем первые 5 строк
+                    for col_idx, cell in enumerate(row.cells):
+                        if target_text in cell.text:
+                            contains_target = True
+                            target_cells_info.append({
+                                "row": row_idx,
+                                "col": col_idx,
+                                "content": cell.text.strip()[:100]
+                            })
+                
+                table_info = {
+                    "index": table_idx,
+                    "headers": headers,
+                    "text_before": text_before_table[:300] if text_before_table else "",  # Ограничиваем длину
+                    "num_rows": num_rows,
+                    "num_cols": num_cols,
+                    "contains_target": contains_target,
+                    "target_cells": target_cells_info[:3]  # Первые 3 совпадения
+                }
+                tables_info.append(table_info)
+            
+            # Формируем промпт для LLM
+            system_prompt = """Ты эксперт по анализу структуры документов Word. 
+Твоя задача - определить, какая таблица из списка является целевой для выполнения изменения на основе:
+1. Семантики описания инструкции
+2. Названия таблицы (если указано) - ВАЖНО: ищи название не только в заголовках таблицы, но и в тексте ПЕРЕД таблицей
+3. Наличия искомого текста в таблице
+4. Структуры и содержимого таблиц
+
+Верни JSON с индексами целевых таблиц (может быть одна или несколько, если изменение касается нескольких таблиц)."""
+
+            tables_summary = "\n".join([
+                f"Таблица {t['index']}:\n"
+                + (f"  Текст перед таблицей: {t['text_before']}\n" if t['text_before'] else "  Текст перед таблицей: (нет)\n")
+                + f"  Заголовки таблицы: {'; '.join(t['headers'][:2]) if t['headers'] else '(нет)'}\n"
+                + f"  Размер: {t['num_rows']} строк × {t['num_cols']} столбцов\n"
+                + f"  Содержит target_text: {'Да' if t['contains_target'] else 'Нет'}\n"
+                + (f"  Совпадения: {', '.join(['Row ' + str(c['row']) + ', Col ' + str(c['col']) for c in t['target_cells']])}\n" if t['target_cells'] else "")
+                for t in tables_info
+            ])
+            
+            user_prompt = f"""ИНСТРУКЦИЯ: {description}
+
+ИСКОМЫЙ ТЕКСТ: "{target_text}"
+НАЗВАНИЕ ТАБЛИЦЫ (если указано): {table_name if table_name else 'Не указано'}
+
+ДОСТУПНЫЕ ТАБЛИЦЫ В ДОКУМЕНТЕ:
+{tables_summary}
+
+ПРОАНАЛИЗИРУЙ инструкцию и определи, какая таблица (или таблицы) является целевой для этого изменения.
+ВАЖНО: 
+- Название таблицы может быть указано в тексте ПЕРЕД таблицей (в параграфах перед таблицей)
+- Ищи название таблицы не только в заголовках самой таблицы, но и в тексте перед ней
+- Учитывай семантику инструкции, название таблицы (в тексте перед таблицей или в заголовках) и наличие искомого текста
+
+Верни JSON:
+{{
+  "target_table_indices": [0, 1, ...],
+  "confidence": 0.95,
+  "reasoning": "объяснение выбора"
+}}
+
+Если изменение точечное и касается конкретной таблицы, верни только её индекс.
+Если изменение должно применяться к нескольким таблицам, верни все соответствующие индексы.
+Если не удалось точно определить, верни пустой массив."""
+
+            logger.info(f"   🤖 Отправка запроса к LLM для определения целевой таблицы...")
+            
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,  # Низкая температура для более точного определения
+                max_tokens=1024,
+                response_format={"type": "json_object"},
+            )
+            
+            content = response.choices[0].message.content if response.choices else None
+            if isinstance(content, list):
+                content = "".join(
+                    segment.get("text", "")
+                    for segment in content
+                    if isinstance(segment, dict)
+                )
+            
+            if not isinstance(content, str) or not content.strip():
+                logger.warning("LLM не вернул корректный ответ для определения таблицы")
+                return None
+            
+            # Очистка JSON
+            content_cleaned = content.strip()
+            if content_cleaned.startswith("```"):
+                lines = content_cleaned.split("\n")
+                if len(lines) > 1:
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content_cleaned = "\n".join(lines).strip()
+            
+            # Парсинг JSON
+            result = json.loads(content_cleaned)
+            
+            # Валидация результата
+            if "target_table_indices" not in result:
+                logger.warning("LLM вернул некорректную структуру для определения таблицы")
+                return None
+            
+            target_indices = result["target_table_indices"]
+            if not isinstance(target_indices, list):
+                logger.warning("target_table_indices должен быть списком")
+                return None
+            
+            # Фильтруем индексы (проверяем, что они валидны)
+            valid_indices = [idx for idx in target_indices if isinstance(idx, int) and 0 <= idx < len(doc.tables)]
+            
+            confidence = result.get("confidence", 0)
+            reasoning = result.get("reasoning", "")
+            
+            if valid_indices:
+                logger.info(f"   ✅ LLM определил целевые таблицы: {valid_indices} (confidence: {confidence:.2f})")
+                if reasoning:
+                    logger.info(f"   💭 LLM reasoning: {reasoning[:200]}...")
+                return valid_indices
+            else:
+                logger.info(f"   ⚠️ LLM не смог точно определить целевую таблицу (confidence: {confidence:.2f})")
+                return None
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON от LLM при определении таблицы: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при запросе к LLM для определения таблицы: {e}")
+            return None
+    
+    def _get_table_context(self, table, row_idx: int, max_header_rows: int = 2, max_sample_rows: int = 2) -> Dict[str, Any]:
+        """
+        Получает контекст таблицы: заголовки и соседние строки для анализа LLM.
+        
+        Args:
+            table: Таблица из python-docx
+            row_idx: Индекс текущей строки
+            max_header_rows: Максимальное количество строк заголовка
+            max_sample_rows: Максимальное количество соседних строк для примера
+            
+        Returns:
+            Контекст таблицы с заголовками и образцами строк
+        """
+        context = {
+            "headers": [],
+            "sample_rows_before": [],
+            "current_row": [],
+            "sample_rows_after": [],
+            "total_columns": 0
+        }
+        
+        try:
+            if not table.rows:
+                return context
+            
+            # Получаем заголовки (первые max_header_rows строк)
+            for i in range(min(max_header_rows, len(table.rows))):
+                header_row = []
+                for cell in table.rows[i].cells:
+                    header_row.append(cell.text.strip())
+                context["headers"].append(header_row)
+            
+            # Определяем общее количество столбцов
+            if table.rows:
+                context["total_columns"] = len(table.rows[0].cells)
+            
+            # Получаем текущую строку
+            if row_idx < len(table.rows):
+                for cell in table.rows[row_idx].cells:
+                    context["current_row"].append(cell.text.strip())
+            
+            # Получаем строки перед текущей
+            start_idx = max(0, row_idx - max_sample_rows)
+            for i in range(start_idx, row_idx):
+                sample_row = []
+                for cell in table.rows[i].cells:
+                    sample_row.append(cell.text.strip())
+                context["sample_rows_before"].append(sample_row)
+            
+            # Получаем строки после текущей
+            end_idx = min(len(table.rows), row_idx + 1 + max_sample_rows)
+            for i in range(row_idx + 1, end_idx):
+                sample_row = []
+                for cell in table.rows[i].cells:
+                    sample_row.append(cell.text.strip())
+                context["sample_rows_after"].append(sample_row)
+                
+        except Exception as e:
+            logger.warning(f"Ошибка получения контекста таблицы: {e}")
+        
+        return context
+    
+    async def _map_text_with_llm(
+        self,
+        new_text: str,
+        target_text: str,
+        row_structure: Dict,
+        algorithmic_distribution: Dict,
+        description: str = "",
+        table_context: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Использует LLM для проверки и корректировки алгоритмического распределения текста по столбцам.
+        
+        Args:
+            new_text: Новый текст для распределения
+            target_text: Исходный текст для замены
+            row_structure: Структура строки
+            algorithmic_distribution: Результат алгоритмического распределения
+            description: Описание инструкции
+            table_context: Контекст таблицы (заголовки, соседние строки)
+            
+        Returns:
+            Словарь с корректированным распределением и уверенностью, или None при ошибке
+        """
+        if not self.openai_client:
+            logger.warning("LLM клиент не инициализирован, пропускаем проверку")
+            return None
+        
+        try:
+            # Формируем контекст для LLM
+            columns = row_structure.get("columns", [])
+            table_type = row_structure.get("table_type", "unknown")
+            
+            # Подготовка информации о текущей строке
+            current_row_info = "\n".join([
+                f"  Столбец {col['index']}: '{col['content']}' (тип: {col['type']})"
+                for col in columns
+            ])
+            
+            # Подготовка алгоритмического результата
+            algo_result = "\n".join([
+                f"  Столбец {col_idx}: '{content}'"
+                for col_idx, content in algorithmic_distribution.get("columns_mapping", {}).items()
+            ])
+            
+            # Подготовка контекста таблицы
+            table_info = ""
+            if table_context:
+                if table_context.get("headers"):
+                    headers_text = "\n".join([
+                        f"  {' | '.join(header)}"
+                        for header in table_context["headers"]
+                    ])
+                    table_info += f"\nЗаголовки таблицы:\n{headers_text}\n"
+                
+                if table_context.get("sample_rows_before"):
+                    sample_text = "\n".join([
+                        f"  {' | '.join(row)}"
+                        for row in table_context["sample_rows_before"]
+                    ])
+                    table_info += f"\nСтроки перед текущей:\n{sample_text}\n"
+                
+                if table_context.get("sample_rows_after"):
+                    sample_text = "\n".join([
+                        f"  {' | '.join(row)}"
+                        for row in table_context["sample_rows_after"]
+                    ])
+                    table_info += f"\nСтроки после текущей:\n{sample_text}\n"
+            
+            # Формируем промпт для LLM
+            system_prompt = """Ты эксперт по анализу структуры таблиц в Word документах. 
+Твоя задача - проверить и скорректировать распределение текста по столбцам таблицы на основе:
+1. Семантики текста инструкции
+2. Структуры и содержимого текущей строки
+3. Контекста таблицы (заголовки, соседние строки)
+
+Верни JSON с корректированным распределением и оценкой уверенности (0.0-1.0).
+Если алгоритмический результат корректен, подтверди его с высокой уверенностью.
+Если нужна корректировка, предложи улучшенный вариант с объяснением."""
+
+            user_prompt = f"""ИНСТРУКЦИЯ: {description}
+
+ТЕКУЩАЯ СТРОКА ТАБЛИЦЫ:
+{current_row_info}
+
+НОВЫЙ ТЕКСТ ДЛЯ РАСПРЕДЕЛЕНИЯ: "{new_text}"
+ИСХОДНЫЙ ТЕКСТ: "{target_text}"
+
+АЛГОРИТМИЧЕСКОЕ РАСПРЕДЕЛЕНИЕ:
+{algo_result}
+Стратегия: {algorithmic_distribution.get('strategy', 'unknown')}
+
+КОНТЕКСТ ТАБЛИЦЫ:
+{table_info}
+
+Тип таблицы: {table_type}
+Количество столбцов: {len(columns)}
+
+ПРОАНАЛИЗИРУЙ распределение и верни JSON:
+{{
+  "distribution": {{
+    "columns_mapping": {{
+      "0": "текст для столбца 0",
+      "1": "текст для столбца 1",
+      ...
+    }},
+    "strategy": "название стратегии",
+    "llm_corrected": true
+  }},
+  "confidence": 0.95,
+  "reasoning": "объяснение корректировки или подтверждения"
+}}
+
+Если распределение корректно, установи confidence >= 0.9 и подтверди результат.
+Если нужна корректировка, установи confidence >= 0.7 и предложи улучшенный вариант."""
+
+            logger.info(f"   🤖 Отправка запроса к LLM для проверки распределения...")
+            
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,  # Немного творчества для корректировки
+                max_tokens=2048,
+                response_format={"type": "json_object"},
+            )
+            
+            content = response.choices[0].message.content if response.choices else None
+            if isinstance(content, list):
+                content = "".join(
+                    segment.get("text", "")
+                    for segment in content
+                    if isinstance(segment, dict)
+                )
+            
+            if not isinstance(content, str) or not content.strip():
+                logger.warning("LLM не вернул корректный ответ")
+                return None
+            
+            # Очистка JSON от markdown code blocks
+            content_cleaned = content.strip()
+            if content_cleaned.startswith("```"):
+                lines = content_cleaned.split("\n")
+                if len(lines) > 1:
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content_cleaned = "\n".join(lines).strip()
+            
+            # Парсинг JSON
+            result = json.loads(content_cleaned)
+            
+            # Валидация результата
+            if "distribution" not in result or "confidence" not in result:
+                logger.warning("LLM вернул некорректную структуру")
+                return None
+            
+            # Преобразование columns_mapping в правильный формат
+            distribution = result["distribution"]
+            if "columns_mapping" in distribution:
+                # Преобразуем строковые ключи в int
+                columns_mapping = {}
+                for key, value in distribution["columns_mapping"].items():
+                    try:
+                        col_idx = int(key)
+                        columns_mapping[col_idx] = value
+                    except ValueError:
+                        logger.warning(f"Некорректный индекс столбца: {key}")
+                distribution["columns_mapping"] = columns_mapping
+            
+            logger.info(f"   ✅ LLM вернул результат (confidence: {result.get('confidence', 0):.2f})")
+            if result.get("reasoning"):
+                logger.info(f"   💭 LLM reasoning: {result['reasoning'][:200]}...")
+            
+            return {
+                "distribution": distribution,
+                "confidence": float(result.get("confidence", 0)),
+                "reasoning": result.get("reasoning", "")
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON от LLM: {e}")
+            logger.debug(f"Содержимое ответа: {content_cleaned[:500] if 'content_cleaned' in locals() else 'N/A'}")
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при запросе к LLM для проверки распределения: {e}")
+            return None
+    
+    def _apply_structured_replacement(self, row, target_text: str, distribution: Dict) -> bool:
+        """
+        Применяет структурированную замену в строке таблицы.
+        
+        Args:
+            row: Строка таблицы
+            target_text: Исходный текст
+            distribution: Распределение по столбцам
+            
+        Returns:
+            True если замена была выполнена
+        """
+        replaced = False
+        columns_mapping = distribution.get("columns_mapping", {})
+        strategy = distribution.get("strategy", "")
+        
+        try:
+            # Для структурированной замены заменяем все столбцы из mapping
+            # независимо от того, содержится ли target_text в каждом столбце
+            for col_idx, new_content in columns_mapping.items():
+                if col_idx < len(row.cells):
+                    cell = row.cells[col_idx]
+                    old_content = cell.text.strip()
+                    
+                    # Для структурированной замены всегда заменяем все столбцы из mapping
+                    # Это гарантирует, что вся строка будет обновлена корректно
+                    logger.info(f"      Замена в столбце {col_idx}: '{old_content}' → '{new_content}'")
+                    
+                    # Сохраняем форматирование через runs
+                    if cell.paragraphs:
+                        para = cell.paragraphs[0]
+                        if para.runs:
+                            # Заменяем текст в первом run, сохраняя форматирование
+                            para.runs[0].text = new_content
+                            # Удаляем остальные runs, если они есть
+                            for run in para.runs[1:]:
+                                para._element.remove(run._element)
+                        else:
+                            # Если нет runs, создаем новый
+                            para.text = new_content
+                    else:
+                        # Если нет параграфов, создаем новый
+                        cell.text = new_content
+                    
+                    replaced = True
+        
+        except Exception as e:
+            logger.error(f"Ошибка применения структурированной замены: {e}")
+        
+        return replaced
+
+    def _should_use_structured_replacement(self, description: str) -> bool:
+        """
+        Определяет, нужно ли использовать структурированную замену (распределение по столбцам)
+        на основе анализа описания инструкции.
+        
+        Args:
+            description: Описание инструкции
+            
+        Returns:
+            True если требуется структурированная замена (распределение по столбцам)
+        """
+        description_lower = description.lower()
+        
+        # Ключевые фразы, указывающие на распределение по столбцам (замена строки таблицы)
+        structured_keywords = [
+            "строку",
+            "строки",
+            "в таблице",
+            "таблице строку",
+            "таблице строки",
+        ]
+        
+        # Ключевые фразы, указывающие на простую замену фразы
+        simple_keywords = [
+            "слова",
+            "слово",
+            "фразу",
+            "фразы",
+            "текст",
+            "в пункте",
+            "в разделе",
+            "в параграфе",
+        ]
+        
+        # Проверяем наличие ключевых слов для структурированной замены
+        for keyword in structured_keywords:
+            if keyword in description_lower:
+                # Дополнительная проверка: должно быть слово "изложить" или "заменить"
+                if "изложить" in description_lower or "заменить" in description_lower:
+                    logger.info(f"   🔍 Обнаружена инструкция на распределение по столбцам: '{keyword}'")
+                    return True
+        
+        # Если найдены ключевые слова для простой замены
+        for keyword in simple_keywords:
+            if keyword in description_lower:
+                logger.info(f"   🔍 Обнаружена инструкция на простую замену фразы: '{keyword}'")
+                return False
+        
+        # По умолчанию - простая замена
+        logger.info(f"   🔍 По умолчанию: простая замена фразы")
+        return False
+
+    async def _find_paragraph_location_with_llm(
+        self,
+        doc: Document,
+        description: str,
+        target_text: str,
+        punkt_number: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Использует LLM для поиска пункта и определения его местоположения (в таблице или параграфе).
+        
+        Args:
+            doc: Документ python-docx
+            description: Описание инструкции
+            target_text: Искомый текст для замены
+            punkt_number: Номер пункта (если указан)
+            
+        Returns:
+            Словарь с информацией о местоположении пункта, или None при ошибке
+        """
+        if not self.openai_client:
+            logger.warning("LLM клиент не инициализирован, пропускаем поиск пункта через LLM")
+            return None
+        
+        if not punkt_number:
+            logger.info("Номер пункта не указан, пропускаем LLM поиск")
+            return None
+        
+        try:
+            # Подготовка информации о документе для LLM
+            # Ищем все упоминания номера пункта
+            punkt_locations = []
+            
+            # Ищем в параграфах
+            for para_idx, para in enumerate(doc.paragraphs[:50]):  # Ограничиваем первыми 50 параграфами
+                para_text = para.text.strip()
+                # Проверяем различные форматы номера пункта
+                punkt_patterns = [
+                    f"{punkt_number}.",
+                    f"{punkt_number})",
+                    f"{punkt_number}:",
+                    f"пункт {punkt_number}",
+                    f"п.{punkt_number}",
+                ]
+                for pattern in punkt_patterns:
+                    if pattern in para_text:
+                        punkt_locations.append({
+                            "type": "paragraph",
+                            "index": para_idx,
+                            "text": para_text[:200],
+                            "contains_target": target_text in para_text
+                        })
+                        break
+            
+            # Ищем в таблицах
+            table_info_list = []
+            for table_idx, table in enumerate(doc.tables):
+                table_rows_info = []
+                for row_idx, row in enumerate(table.rows[:20]):  # Ограничиваем первыми 20 строками
+                    row_text = ""
+                    contains_punkt = False
+                    contains_target = False
+                    
+                    for cell_idx, cell in enumerate(row.cells):
+                        cell_text = cell.text.strip()
+                        row_text += f" | {cell_text}"
+                        
+                        # Проверяем наличие номера пункта
+                        punkt_patterns = [
+                            f"{punkt_number}.",
+                            f"{punkt_number})",
+                            f"{punkt_number}:",
+                            f"пункт {punkt_number}",
+                            f"п.{punkt_number}",
+                        ]
+                        for pattern in punkt_patterns:
+                            if pattern in cell_text:
+                                contains_punkt = True
+                                break
+                        
+                        # Проверяем наличие target_text
+                        if target_text in cell_text:
+                            contains_target = True
+                    
+                    if contains_punkt or contains_target:
+                        table_rows_info.append({
+                            "row_index": row_idx,
+                            "text": row_text[:300],
+                            "contains_punkt": contains_punkt,
+                            "contains_target": contains_target
+                        })
+                
+                if table_rows_info:
+                    # Получаем заголовки таблицы
+                    headers = []
+                    for i in range(min(2, len(table.rows))):
+                        header_row = []
+                        for cell in table.rows[i].cells:
+                            header_row.append(cell.text.strip()[:50])
+                        headers.append(" | ".join(header_row))
+                    
+                    table_info_list.append({
+                        "table_index": table_idx,
+                        "headers": headers,
+                        "rows": table_rows_info[:5]  # Первые 5 релевантных строк
+                    })
+            
+            # Формируем промпт для LLM
+            system_prompt = """Ты эксперт по анализу структуры документов Word. 
+Твоя задача - найти указанный пункт в документе и определить:
+1. Находится ли пункт в таблице или в обычном параграфе
+2. Если в таблице - в какой строке таблицы находится текст для замены
+3. В какой ячейке находится target_text для замены
+
+Верни JSON с точной информацией о местоположении пункта и текста для замены."""
+
+            paragraphs_info = "\n".join([
+                f"Параграф {loc['index']}: {loc['text']} (содержит target_text: {loc['contains_target']})"
+                for loc in punkt_locations[:10]  # Первые 10 найденных
+            ]) if punkt_locations else "Параграфы с номером пункта не найдены"
+            
+            tables_info = "\n".join([
+                f"Таблица {t['table_index']}:\n"
+                f"  Заголовки: {'; '.join(t['headers'])}\n"
+                + "\n".join([
+                    f"  Строка {r['row_index']}: {r['text']} (пункт: {r['contains_punkt']}, target: {r['contains_target']})"
+                    for r in t['rows']
+                ])
+                for t in table_info_list
+            ]) if table_info_list else "Таблицы с номером пункта не найдены"
+            
+            user_prompt = f"""ИНСТРУКЦИЯ: {description}
+
+НОМЕР ПУНКТА: {punkt_number}
+ИСКОМЫЙ ТЕКСТ ДЛЯ ЗАМЕНЫ: "{target_text}"
+
+ПАРАГРАФЫ С НОМЕРОМ ПУНКТА:
+{paragraphs_info}
+
+ТАБЛИЦЫ С НОМЕРОМ ПУНКТА:
+{tables_info}
+
+ПРОАНАЛИЗИРУЙ и определи:
+1. Находится ли пункт {punkt_number} в таблице или в обычном параграфе?
+2. Если в таблице - в какой таблице (индекс) и в какой строке (индекс строки)?
+3. В какой ячейке (индекс столбца) находится target_text "{target_text}"?
+4. Если в параграфе - в каком параграфе (индекс)?
+
+Верни JSON:
+{{
+  "location_type": "table" или "paragraph",
+  "table_index": 0 (если location_type == "table"),
+  "row_index": 5 (если location_type == "table"),
+  "cell_index": 1 (если location_type == "table" и указан),
+  "paragraph_index": 10 (если location_type == "paragraph"),
+  "confidence": 0.95,
+  "reasoning": "объяснение определения местоположения"
+}}
+
+Если не удалось точно определить, верни location_type: "unknown"."""
+
+            logger.info(f"   🤖 Отправка запроса к LLM для поиска пункта {punkt_number}...")
+            
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=1024,
+                response_format={"type": "json_object"},
+            )
+            
+            content = response.choices[0].message.content if response.choices else None
+            if isinstance(content, list):
+                content = "".join(
+                    segment.get("text", "")
+                    for segment in content
+                    if isinstance(segment, dict)
+                )
+            
+            if not isinstance(content, str) or not content.strip():
+                logger.warning("LLM не вернул корректный ответ для поиска пункта")
+                return None
+            
+            # Очистка JSON
+            content_cleaned = content.strip()
+            if content_cleaned.startswith("```"):
+                lines = content_cleaned.split("\n")
+                if len(lines) > 1:
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content_cleaned = "\n".join(lines).strip()
+            
+            # Парсинг JSON
+            result = json.loads(content_cleaned)
+            
+            # Валидация результата
+            if "location_type" not in result:
+                logger.warning("LLM вернул некорректную структуру для поиска пункта")
+                return None
+            
+            location_type = result.get("location_type", "unknown")
+            confidence = result.get("confidence", 0)
+            reasoning = result.get("reasoning", "")
+            
+            logger.info(f"   ✅ LLM определил местоположение: {location_type} (confidence: {confidence:.2f})")
+            if reasoning:
+                logger.info(f"   💭 LLM reasoning: {reasoning[:200]}...")
+            
+            if confidence >= 0.7 and location_type != "unknown":
+                return {
+                    "location_type": location_type,
+                    "table_index": result.get("table_index"),
+                    "row_index": result.get("row_index"),
+                    "cell_index": result.get("cell_index"),
+                    "paragraph_index": result.get("paragraph_index"),
+                    "confidence": confidence,
+                    "reasoning": reasoning
+                }
+            else:
+                logger.info(f"   ⚠️ LLM не смог точно определить местоположение (confidence: {confidence:.2f})")
+                return None
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON от LLM при поиске пункта: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при запросе к LLM для поиска пункта: {e}")
+            return None
+    
+    async def _intelligent_paragraph_replacement(self, filename: str, target_text: str, new_text: str, description: str, matches: List) -> Dict[str, Any]:
+        """
+        Интеллектуальная замена в параграфах - заменяет содержимое, а не номер пункта.
+        Использует LLM для поиска пункта и определения его местоположения.
+        
+        Args:
+            filename: Путь к файлу
+            target_text: Искомый текст (например, "согласовывается с ДО и ДРМ")
+            new_text: Новый текст (например, "согласовывается с ДО")
+            description: Описание инструкции
+            matches: Найденные совпадения
+            
+        Returns:
+            Результат операции
+        """
+        logger.info(f"🧠 ИНТЕЛЛЕКТУАЛЬНАЯ ЗАМЕНА В ПУНКТЕ:")
+        logger.info(f"   Ищем: '{target_text}'")
+        logger.info(f"   Заменяем на: '{new_text}'")
+        logger.info(f"   Описание: '{description}'")
+        
+        try:
+            # Открываем документ для анализа
+            doc = Document(filename)
+            replacements_made = 0
+            
+            # Извлекаем номер пункта из описания
+            import re
+            punkt_match = re.search(r'пункте\s+(\d+)', description, re.IGNORECASE)
+            punkt_number = punkt_match.group(1) if punkt_match else None
+            
+            logger.info(f"   Номер пункта из описания: {punkt_number}")
+            
+            # ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК ПУНКТА ЧЕРЕЗ LLM
+            llm_location = None
+            if punkt_number:
+                try:
+                    llm_location = await self._find_paragraph_location_with_llm(
+                        doc=doc,
+                        description=description,
+                        target_text=target_text,
+                        punkt_number=punkt_number
+                    )
+                    if llm_location:
+                        logger.info(f"   ✅ LLM определил местоположение пункта {punkt_number}: {llm_location['location_type']}")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Ошибка при LLM поиске пункта, продолжаем с алгоритмическим подходом: {e}")
+            
+            # Если LLM определил местоположение в таблице, используем эту информацию
+            if llm_location and llm_location.get("location_type") == "table":
+                table_idx = llm_location.get("table_index")
+                row_idx = llm_location.get("row_index")
+                
+                if table_idx is not None and row_idx is not None and table_idx < len(doc.tables):
+                    table = doc.tables[table_idx]
+                    if row_idx < len(table.rows):
+                        row = table.rows[row_idx]
+                        logger.info(f"   📍 LLM указал: Таблица {table_idx}, Строка {row_idx}")
+                        
+                        # Ищем target_text в указанной строке
+                        found_cell = None
+                        cell_idx = llm_location.get("cell_index")
+                        
+                        if cell_idx is not None and cell_idx < len(row.cells):
+                            # LLM указал конкретную ячейку
+                            found_cell = row.cells[cell_idx]
+                            if target_text in found_cell.text:
+                                logger.info(f"   ✅ Найден target_text в указанной ячейке {cell_idx}")
+                            else:
+                                logger.warning(f"   ⚠️ target_text не найден в указанной ячейке {cell_idx}, ищем во всей строке")
+                                found_cell = None
+                        
+                        if not found_cell:
+                            # Ищем target_text во всех ячейках строки
+                            for idx, cell in enumerate(row.cells):
+                                if target_text in cell.text:
+                                    found_cell = cell
+                                    cell_idx = idx
+                                    logger.info(f"   ✅ Найден target_text в ячейке {idx}")
+                                    break
+                        
+                        if found_cell:
+                            # Определяем тип замены
+                            use_structured = self._should_use_structured_replacement(description)
+                            table_location = None
+                            
+                            if not use_structured:
+                                # Простая замена
+                                para = found_cell.paragraphs[0] if found_cell.paragraphs else None
+                                if self._smart_replace_in_paragraph(para, target_text, new_text, cell=found_cell):
+                                    replacements_made += 1
+                                    logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {row_idx}, Column {cell_idx} (LLM)")
+                                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                    if table_paragraph_index >= 0:
+                                        table_location = {
+                                            "table_idx": table_idx,
+                                            "row_idx": row_idx,
+                                            "cell_idx": cell_idx,
+                                            "paragraph_index": table_paragraph_index
+                                        }
+                            else:
+                                # Структурированная замена
+                                row_structure = self._analyze_row_structure(row, row_idx)
+                                table_context = self._get_table_context(table, row_idx)
+                                distribution = await self._map_new_text_to_structure(
+                                    new_text=new_text,
+                                    target_text=target_text,
+                                    row_structure=row_structure,
+                                    description=description,
+                                    table_context=table_context
+                                )
+                                if self._apply_structured_replacement(row, target_text, distribution):
+                                    replacements_made += 1
+                                    logger.info(f"   ✅ Структурированная замена выполнена в строке {row_idx} таблицы {table_idx} (LLM)")
+                                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                    if table_paragraph_index >= 0:
+                                        table_location = {
+                                            "table_idx": table_idx,
+                                            "row_idx": row_idx,
+                                            "cell_idx": cell_idx,
+                                            "paragraph_index": table_paragraph_index
+                                        }
+                            
+                            # Сохраняем результат
+                            if replacements_made > 0:
+                                doc.save(filename)
+                                result = {
+                                    "success": True,
+                                    "message": f"Замена выполнена (LLM: таблица {table_idx}, строка {row_idx})",
+                                    "replacements_made": replacements_made,
+                                    "method": "llm_guided_table_replace" if use_structured else "llm_guided_cell_replace",
+                                    "is_table_change": True,
+                                }
+                                if table_location:
+                                    result["table_location"] = table_location
+                                    result["paragraph_index"] = table_location.get("paragraph_index", -1)
+                                return result
+            
+            # Если LLM определил местоположение в параграфе, используем эту информацию
+            elif llm_location and llm_location.get("location_type") == "paragraph":
+                para_idx = llm_location.get("paragraph_index")
+                if para_idx is not None and para_idx < len(doc.paragraphs):
+                    para = doc.paragraphs[para_idx]
+                    if target_text in para.text:
+                        logger.info(f"   📍 LLM указал: Параграф {para_idx}")
+                        if self._smart_replace_in_paragraph(para, target_text, new_text):
+                            replacements_made += 1
+                            logger.info(f"   ✅ Замена выполнена в параграфе {para_idx} (LLM)")
+                            doc.save(filename)
+                            return {
+                                "success": True,
+                                "message": f"Замена выполнена (LLM: параграф {para_idx})",
+                                "replacements_made": replacements_made,
+                                "method": "llm_guided_paragraph_replace",
+                                "is_table_change": False,
+                            }
+            
+            # Если LLM не определил или не использовался, продолжаем с алгоритмическим подходом
+            
+            # Ищем параграфы, которые начинаются с этого номера пункта
+            target_paragraphs = []
+            for idx, para in enumerate(doc.paragraphs):
+                para_text = para.text.strip()
+                if punkt_number and para_text.startswith(f"{punkt_number}."):
+                    target_paragraphs.append((idx, para))
+                    logger.info(f"   Найден пункт {punkt_number} в параграфе {idx}: '{para_text[:50]}...'")
+            
+            # Если не нашли по номеру, используем matches
+            if not target_paragraphs and matches:
+                for match in matches:
+                    if hasattr(match, 'paragraph_index') and match.paragraph_index >= 0 and match.paragraph_index < len(doc.paragraphs):
+                        para = doc.paragraphs[match.paragraph_index]
+                        target_paragraphs.append((match.paragraph_index, para))
+                        logger.info(f"   Используем параграф из match: {match.paragraph_index}")
+            
+            # Если все еще не нашли и есть номер пункта, ищем текст в параграфах с этим номером
+            if not target_paragraphs and punkt_number:
+                logger.info(f"   🔍 Поиск текста '{target_text}' в параграфах с номером пункта {punkt_number}")
+                for idx, para in enumerate(doc.paragraphs):
+                    para_text = para.text.strip()
+                    # Проверяем, что параграф начинается с номера пункта и содержит target_text
+                    if para_text.startswith(f"{punkt_number}.") and target_text in para_text:
+                        target_paragraphs.append((idx, para))
+                        logger.info(f"   ✅ Найден параграф {idx} с номером {punkt_number} и текстом '{target_text[:50]}...'")
+            
+            # Если все еще не нашли, ищем target_text во всех параграфах
+            if not target_paragraphs:
+                logger.info(f"   🔍 Поиск текста '{target_text}' во всех параграфах")
+                for idx, para in enumerate(doc.paragraphs):
+                    if target_text in para.text:
+                        target_paragraphs.append((idx, para))
+                        logger.info(f"   ✅ Найден параграф {idx} с текстом '{target_text[:50]}...'")
+                        # Ограничиваем поиск первым найденным, если есть номер пункта
+                        if punkt_number:
+                            break
+            
+            # Если текст найден в таблице (matches содержат таблицы), ищем в таблицах
+            if not target_paragraphs and matches:
+                table_matches = [m for m in matches if hasattr(m, 'paragraph_index') and m.paragraph_index == -1]
+                if table_matches and punkt_number:
+                    logger.info(f"   🔍 Текст найден в таблице, ищем параграф с номером пункта {punkt_number}")
+                    # Ищем параграф, который начинается с номера пункта
+                    for idx, para in enumerate(doc.paragraphs):
+                        para_text = para.text.strip()
+                        if para_text.startswith(f"{punkt_number}."):
+                            # Проверяем, содержит ли этот параграф или следующий target_text
+                            # (текст может быть в следующем параграфе после номера)
+                            check_paras = [para]
+                            if idx + 1 < len(doc.paragraphs):
+                                check_paras.append(doc.paragraphs[idx + 1])
+                            
+                            for check_para in check_paras:
+                                if target_text in check_para.text:
+                                    target_paragraphs.append((doc.paragraphs.index(check_para), check_para))
+                                    logger.info(f"   ✅ Найден параграф {doc.paragraphs.index(check_para)} с номером {punkt_number} и текстом '{target_text[:50]}...'")
+                                    break
+                            
+                            if target_paragraphs:
+                                break
+            
+            # Заменяем в найденных параграфах
+            for para_idx, para in target_paragraphs:
+                if target_text in para.text:
+                    logger.info(f"   Замена в параграфе {para_idx}: '{target_text}' → '{new_text}'")
+                    if self._smart_replace_in_paragraph(para, target_text, new_text):
+                        replacements_made += 1
+                        logger.info(f"   ✅ Успешная замена в параграфе {para_idx}")
+                        # Если есть номер пункта, обрабатываем только первый найденный
+                        if punkt_number:
+                            break
+            
+            # Если не нашли в параграфах, но текст был найден в таблице, ищем в таблицах
+            table_location = None  # Для сохранения информации о местоположении замены в таблице
+            if replacements_made == 0 and matches:
+                table_matches = [m for m in matches if hasattr(m, 'paragraph_index') and m.paragraph_index == -1]
+                if table_matches and punkt_number:
+                    logger.info(f"   🔍 Текст найден в таблице, ищем в таблицах с номером пункта {punkt_number}")
+                    # Улучшенная логика: находим ячейки с target_text, затем проверяем, содержит ли их строка номер пункта
+                    for table_idx, table in enumerate(doc.tables):
+                        for row_idx, row in enumerate(table.rows):
+                            # Сначала проверяем, содержит ли строка номер пункта (в любой ячейке)
+                            # Проверяем различные форматы: "32.", "32)", "32:", "32", "пункт 32" и т.д.
+                            row_contains_punkt = False
+                            punkt_patterns = [
+                                f"{punkt_number}.",
+                                f"{punkt_number})",
+                                f"{punkt_number}:",
+                                f"{punkt_number} ",
+                                f"пункт {punkt_number}",
+                                f"п.{punkt_number}",
+                            ]
+                            for cell in row.cells:
+                                cell_text = cell.text
+                                for pattern in punkt_patterns:
+                                    if pattern in cell_text:
+                                        row_contains_punkt = True
+                                        logger.info(f"   ✅ Строка {row_idx} в таблице {table_idx} содержит номер пункта {punkt_number} (паттерн: '{pattern}')")
+                                        break
+                                if row_contains_punkt:
+                                    break
+                            
+                            # Также проверяем соседние строки (предыдущую и следующую) на наличие номера пункта
+                            if not row_contains_punkt:
+                                for offset in [-1, 1]:
+                                    check_row_idx = row_idx + offset
+                                    if 0 <= check_row_idx < len(table.rows):
+                                        check_row = table.rows[check_row_idx]
+                                        for cell in check_row.cells:
+                                            cell_text = cell.text
+                                            for pattern in punkt_patterns:
+                                                if pattern in cell_text:
+                                                    row_contains_punkt = True
+                                                    logger.info(f"   ✅ Строка {row_idx} (рядом со строкой {check_row_idx}) в таблице {table_idx} связана с пунктом {punkt_number} (паттерн: '{pattern}')")
+                                                    break
+                                            if row_contains_punkt:
+                                                break
+                                        if row_contains_punkt:
+                                            break
+                            
+                            # Если строка содержит номер пункта, ищем target_text в ячейках этой строки и соседних
+                            if row_contains_punkt:
+                                # Проверяем текущую строку
+                                rows_to_search = [row_idx]
+                                # Если номер пункта был найден в текущей строке, проверяем и соседние на наличие target_text
+                                # (потому что target_text может быть в соседней строке)
+                                for offset in [-1, 1]:
+                                    check_row_idx = row_idx + offset
+                                    if 0 <= check_row_idx < len(table.rows):
+                                        rows_to_search.append(check_row_idx)
+                                
+                                # Ищем target_text во всех релевантных строках и применяем универсальный алгоритм
+                                for search_row_idx in rows_to_search:
+                                    search_row = table.rows[search_row_idx]
+                                    for cell_idx, cell in enumerate(search_row.cells):
+                                        cell_text = cell.text
+                                        if target_text in cell_text:
+                                            logger.info(f"   ✅ Найдена ячейка Table {table_idx}, Row {search_row_idx}, Column {cell_idx} с текстом '{target_text[:50]}...' (связана с пунктом {punkt_number} в строке {row_idx})")
+                                            # Определяем тип замены на основе описания инструкции
+                                            use_structured = self._should_use_structured_replacement(description)
+                                            
+                                            if not use_structured:
+                                                # Простая замена фразы в найденной ячейке
+                                                logger.info(f"   🔄 Простая замена фразы в ячейке (не распределение по столбцам)")
+                                                para = cell.paragraphs[0] if cell.paragraphs else None
+                                                if self._smart_replace_in_paragraph(para, target_text, new_text, cell=cell):
+                                                    replacements_made += 1
+                                                    logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {search_row_idx}, Column {cell_idx}")
+                                                    # Сохраняем информацию о местоположении для аннотаций
+                                                    if table_location is None:
+                                                        table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                        if table_paragraph_index >= 0:
+                                                            table_location = {
+                                                                "table_idx": table_idx,
+                                                                "row_idx": search_row_idx,
+                                                                "cell_idx": cell_idx,
+                                                                "paragraph_index": table_paragraph_index
+                                                            }
+                                                            logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {search_row_idx}, Para {table_paragraph_index}")
+                                                    break
+                                            else:
+                                                # Структурированная замена (распределение по столбцам)
+                                                logger.info(f"   🔄 Структурированная замена (распределение по столбцам)")
+                                                # Анализируем структуру строки
+                                                row_structure = self._analyze_row_structure(search_row, search_row_idx)
+                                                # Получаем контекст таблицы для LLM
+                                                table_context = self._get_table_context(table, search_row_idx)
+                                                # Распределяем новый текст по структуре (алгоритм + LLM проверка)
+                                                distribution = await self._map_new_text_to_structure(
+                                                    new_text=new_text,
+                                                    target_text=target_text,
+                                                    row_structure=row_structure,
+                                                    description=description,
+                                                    table_context=table_context
+                                                )
+                                                # Применяем структурированную замену
+                                                if self._apply_structured_replacement(search_row, target_text, distribution):
+                                                    replacements_made += 1
+                                                    logger.info(f"   ✅ Структурированная замена выполнена в строке {search_row_idx} таблицы {table_idx}")
+                                                    # Сохраняем информацию о местоположении для аннотаций
+                                                    if table_location is None:
+                                                        table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                        if table_paragraph_index >= 0:
+                                                            table_location = {
+                                                                "table_idx": table_idx,
+                                                                "row_idx": search_row_idx,
+                                                                "cell_idx": cell_idx,
+                                                                "paragraph_index": table_paragraph_index
+                                                            }
+                                                            logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {search_row_idx}, Para {table_paragraph_index}")
+                                                    break
+                                    if replacements_made > 0:
+                                        break
+                                if replacements_made > 0:
+                                    break
+                                    if replacements_made > 0:
+                                        break
+                                if replacements_made > 0:
+                                    break
+                        if replacements_made > 0:
+                            break
+                    
+                    # Если не нашли через проверку строк, пробуем поискать ячейки, содержащие оба текста
+                    if replacements_made == 0:
+                        logger.info(f"   🔍 Поиск ячеек, содержащих и номер пункта, и target_text")
+                        for table_idx, table in enumerate(doc.tables):
+                            for row_idx, row in enumerate(table.rows):
+                                for cell_idx, cell in enumerate(row.cells):
+                                    cell_text = cell.text
+                                    # Проверяем, содержит ли ячейка номер пункта и target_text
+                                    if f"{punkt_number}." in cell_text and target_text in cell_text:
+                                        logger.info(f"   ✅ Найдена ячейка Table {table_idx}, Row {row_idx}, Column {cell_idx} с номером {punkt_number} и текстом '{target_text[:50]}...'")
+                                        # Определяем тип замены на основе описания инструкции
+                                        use_structured = self._should_use_structured_replacement(description)
+                                        
+                                        if not use_structured:
+                                            # Простая замена фразы в найденной ячейке
+                                            logger.info(f"   🔄 Простая замена фразы в ячейке (не распределение по столбцам)")
+                                            para = cell.paragraphs[0] if cell.paragraphs else None
+                                            if self._smart_replace_in_paragraph(para, target_text, new_text, cell=cell):
+                                                replacements_made += 1
+                                                logger.info(f"   ✅ Простая замена выполнена в ячейке Table {table_idx}, Row {row_idx}, Column {cell_idx}")
+                                                # Сохраняем информацию о местоположении для аннотаций
+                                                if table_location is None:
+                                                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                    if table_paragraph_index >= 0:
+                                                        table_location = {
+                                                            "table_idx": table_idx,
+                                                            "row_idx": row_idx,
+                                                            "cell_idx": cell_idx,
+                                                            "paragraph_index": table_paragraph_index
+                                                        }
+                                                        logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {row_idx}, Para {table_paragraph_index}")
+                                                break
+                                        else:
+                                            # Структурированная замена (распределение по столбцам)
+                                            logger.info(f"   🔄 Структурированная замена (распределение по столбцам)")
+                                            # Анализируем структуру строки
+                                            row_structure = self._analyze_row_structure(row, row_idx)
+                                            # Получаем контекст таблицы для LLM
+                                            table_context = self._get_table_context(table, row_idx)
+                                            # Распределяем новый текст по структуре (алгоритм + LLM проверка)
+                                            distribution = await self._map_new_text_to_structure(
+                                                new_text=new_text,
+                                                target_text=target_text,
+                                                row_structure=row_structure,
+                                                description=description,
+                                                table_context=table_context
+                                            )
+                                            # Применяем структурированную замену
+                                            if self._apply_structured_replacement(row, target_text, distribution):
+                                                replacements_made += 1
+                                                logger.info(f"   ✅ Структурированная замена выполнена в строке {row_idx} таблицы {table_idx}")
+                                                # Сохраняем информацию о местоположении для аннотаций
+                                                if table_location is None:
+                                                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx)
+                                                    if table_paragraph_index >= 0:
+                                                        table_location = {
+                                                            "table_idx": table_idx,
+                                                            "row_idx": row_idx,
+                                                            "cell_idx": cell_idx,
+                                                            "paragraph_index": table_paragraph_index
+                                                        }
+                                                        logger.info(f"   📍 Сохранено местоположение для аннотации: Table {table_idx}, Row {row_idx}, Para {table_paragraph_index}")
+                                                break
+                                if replacements_made > 0:
+                                    break
+                            if replacements_made > 0:
+                                break
+            
+            if replacements_made > 0:
+                doc.save(filename)
+                result = {
+                    "success": True,
+                    "message": f"Интеллектуальная замена в пункте выполнена в {replacements_made} параграфах/ячейках",
+                    "replacements_made": replacements_made,
+                    "method": "intelligent_paragraph_replace",
+                    "is_table_change": False,  # По умолчанию не табличное изменение
+                    "details": {}
+                }
+                
+                # Проверяем, было ли изменение в таблице (для аннотаций)
+                if table_location:
+                    # Если изменение было в таблице, добавляем информацию о местоположении
+                    result["is_table_change"] = True
+                    result["details"]["is_table_change"] = True
+                    result["details"]["table_location"] = table_location
+                    result["paragraph_index"] = table_location.get("paragraph_index", -1)
+                
+                return result
+            else:
+                return {
+                    "success": False,
+                    "error": "NO_PARAGRAPH_REPLACEMENTS",
+                    "message": f"Текст '{target_text}' не найден в пунктах"
+                }
+                
+        except Exception as e:
+            logger.error(f"Ошибка интеллектуальной замены в пункте: {e}")
+            return {
+                "success": False,
+                "error": "INTELLIGENT_PARAGRAPH_ERROR",
+                "message": f"Ошибка интеллектуальной замены в пункте: {e}"
+            }
+
+    def _smart_replace_in_paragraph(self, paragraph, old: str, new: str, cell=None) -> bool:
+        """
+        Умная замена в параграфе - заменяет только содержимое, не трогая номер пункта.
+        
+        Args:
+            paragraph: Параграф для замены (может быть None, если передан cell)
+            old: Старый текст
+            new: Новый текст
+            cell: Ячейка таблицы (опционально)
+            
+        Returns:
+            True если замена была выполнена
+        """
+        replaced = False
+        
+        # Если передан cell, работаем с его параграфами
+        if cell is not None:
+            # Проверяем все параграфы в ячейке
+            if cell.paragraphs:
+                # Сначала пробуем найти текст в каждом параграфе и заменить его
+                for para in cell.paragraphs:
+                    if old in para.text:
+                        # Текст найден в этом параграфе
+                        original_text = para.text
+                        
+                        # Проверяем, начинается ли параграф с номера пункта
+                        import re
+                        punkt_match = re.match(r'^(\d+\.?\s*)', original_text)
+                        
+                        if punkt_match:
+                            # Параграф начинается с номера - заменяем только в содержимой части
+                            punkt_prefix = punkt_match.group(1)
+                            content_part = original_text[len(punkt_prefix):]
+                            
+                            if old in content_part:
+                                new_content = content_part.replace(old, new)
+                                new_full_text = punkt_prefix + new_content
+                                
+                                logger.info(f"   Умная замена в ячейке (с номером пункта):")
+                                logger.info(f"     Префикс пункта: '{punkt_prefix}'")
+                                logger.info(f"     Старое содержимое: '{content_part[:50]}...'")
+                                logger.info(f"     Новое содержимое: '{new_content[:50]}...'")
+                                
+                                # Заменяем через runs для сохранения форматирования
+                                found_in_runs = False
+                                for run in para.runs:
+                                    if old in run.text:
+                                        run.text = run.text.replace(old, new)
+                                        found_in_runs = True
+                                
+                                # Если не удалось через runs, заменяем весь текст
+                                if not found_in_runs:
+                                    para.text = new_full_text
+                                
+                                replaced = True
+                                break
+                        else:
+                            # Обычная замена для параграфов без номера пункта
+                            # Пробуем через runs сначала
+                            found_in_runs = False
+                            for run in para.runs:
+                                if old in run.text:
+                                    run.text = run.text.replace(old, new)
+                                    found_in_runs = True
+                                    replaced = True
+                            
+                            # Если не удалось через runs, заменяем весь текст параграфа
+                            if not found_in_runs and old in para.text:
+                                para.text = para.text.replace(old, new)
+                                replaced = True
+                            
+                            if replaced:
+                                logger.info(f"   Умная замена в ячейке (обычный параграф): '{old}' → '{new}'")
+                                break
+                
+                # Если не нашли текст в отдельных параграфах, пробуем заменить во всей ячейке
+                if not replaced and old in cell.text:
+                    logger.info(f"   Замена в ячейке (по всему тексту): '{old}' → '{new}'")
+                    # Заменяем напрямую в ячейке
+                    cell.text = cell.text.replace(old, new)
+                    replaced = old not in cell.text  # Проверяем, что замена прошла
+            else:
+                # Если нет параграфов, заменяем напрямую в ячейке
+                if old in cell.text:
+                    logger.info(f"   Замена в ячейке (нет параграфов): '{old}' → '{new}'")
+                    cell.text = cell.text.replace(old, new)
+                    replaced = old not in cell.text  # Проверяем, что замена прошла
+        
+            return replaced
+        
+        # Если cell не передан, работаем только с paragraph
+        if paragraph is None:
+            return False
+            
+        original_text = paragraph.text
+        
+        # Проверяем, начинается ли параграф с номера пункта
+        import re
+        punkt_match = re.match(r'^(\d+\.?\s*)', original_text)
+        
+        if punkt_match:
+            # Параграф начинается с номера - заменяем только в содержимой части
+            punkt_prefix = punkt_match.group(1)
+            content_part = original_text[len(punkt_prefix):]
+            
+            if old in content_part:
+                new_content = content_part.replace(old, new)
+                new_full_text = punkt_prefix + new_content
+                
+                logger.info(f"   Умная замена:")
+                logger.info(f"     Префикс пункта: '{punkt_prefix}'")
+                logger.info(f"     Старое содержимое: '{content_part[:50]}...'")
+                logger.info(f"     Новое содержимое: '{new_content[:50]}...'")
+                
+                # Заменяем текст через runs для сохранения форматирования
+                found_in_runs = False
+                for run in paragraph.runs:
+                    if old in run.text:
+                        run.text = run.text.replace(old, new)
+                        found_in_runs = True
+                        replaced = True
+                
+                # Если не удалось через runs, заменяем весь текст
+                if not found_in_runs:
+                    paragraph.text = new_full_text
+                    replaced = True
+        else:
+            # Обычная замена для параграфов без номера пункта
+            found_in_runs = False
+            for run in paragraph.runs:
+                if old in run.text:
+                    run.text = run.text.replace(old, new)
+                    found_in_runs = True
+                    replaced = True
+            
+            # Если не удалось через runs, заменяем весь текст
+            if not found_in_runs and old in paragraph.text:
+                paragraph.text = paragraph.text.replace(old, new)
+                replaced = True
+        
+        return replaced
+
     async def _handle_replace_point_text(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
         """
         Замена всего текста пункта/подпункта новым текстом.
@@ -836,20 +5609,12 @@ class DocumentChangeAgent:
         normalized_start = " ".join(point_start.split())
         logger.debug(f"Поиск пункта для замены: '{normalized_start}'")
         
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            normalized_start,
-            match_case=False,
-        )
+        matches = await self._safe_find_text(filename, normalized_start, match_case=False)
         
         if not matches:
             # Пробуем варианты
             for variant in [f"{normalized_start.replace('.', '')}.", f"{normalized_start.replace(')', ')')}"]:
-                variant_matches = await mcp_client.find_text_in_document(
-                    filename,
-                    variant,
-                    match_case=False,
-                )
+                variant_matches = await self._safe_find_text(filename, variant, match_case=False)
                 if variant_matches:
                     matches = variant_matches
                     break
@@ -927,28 +5692,16 @@ class DocumentChangeAgent:
         normalized_text = " ".join(text_to_remove.split())
         logger.debug(f"Поиск текста для удаления: '{normalized_text}' (оригинал: '{text_to_remove}')")
         
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            normalized_text,
-            match_case=match_case,
-        )
+        matches = await self._safe_find_text(filename, normalized_text, match_case=match_case)
         
         # Если не найдено, пробуем оригинальный текст
         if not matches and normalized_text != text_to_remove:
-            matches = await mcp_client.find_text_in_document(
-                filename,
-                text_to_remove,
-                match_case=match_case,
-            )
+            matches = await self._safe_find_text(filename, text_to_remove, match_case=match_case)
         
         # Для пунктов пробуем разные форматы
         if not matches and (text_to_remove.isdigit() or text_to_remove.replace(".", "").replace(")", "").isdigit()):
             for variant in [f"{text_to_remove}.", f"{text_to_remove})", f"{text_to_remove}."]:
-                variant_matches = await mcp_client.find_text_in_document(
-                    filename,
-                    variant,
-                    match_case=False,
-                )
+                variant_matches = await self._safe_find_text(filename, variant, match_case=False)
                 if variant_matches:
                     matches = variant_matches
                     logger.info(f"Найдено совпадение для варианта '{variant}'")
@@ -1017,19 +5770,11 @@ class DocumentChangeAgent:
         normalized_after = " ".join(after_text.split())
         logger.debug(f"Поиск якоря для вставки: '{normalized_after}' (оригинал: '{after_text}')")
 
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            normalized_after,
-            match_case=target.get("match_case", False),
-        )
+        matches = await self._safe_find_text(filename, normalized_after, match_case=target.get("match_case", False))
         
         # Если не найдено, пробуем оригинальный текст
         if not matches and normalized_after != after_text:
-            matches = await mcp_client.find_text_in_document(
-                filename,
-                after_text,
-                match_case=target.get("match_case", False),
-            )
+            matches = await self._safe_find_text(filename, after_text, match_case=target.get("match_case", False))
         
         if not matches:
             error_msg = f"Якорь '{after_text}' не найден в документе"
@@ -1085,11 +5830,7 @@ class DocumentChangeAgent:
                 "message": "Для INSERT_SECTION необходимы target.after_heading и payload.heading_text",
             }
 
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            after_heading,
-            match_case=target.get("match_case", False),
-        )
+        matches = await self._safe_find_text(filename, after_heading, match_case=target.get("match_case", False))
         if not matches:
             return {"success": False, "error": "ANCHOR_NOT_FOUND"}
 
@@ -1163,18 +5904,10 @@ class DocumentChangeAgent:
         normalized_after = " ".join(after_text.split())
         logger.debug(f"Поиск якоря для вставки таблицы: '{normalized_after}'")
         
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            normalized_after,
-            match_case=target.get("match_case", False),
-        )
+        matches = await self._safe_find_text(filename, normalized_after, match_case=target.get("match_case", False))
         
         if not matches and normalized_after != after_text:
-            matches = await mcp_client.find_text_in_document(
-                filename,
-                after_text,
-                match_case=target.get("match_case", False),
-            )
+            matches = await self._safe_find_text(filename, after_text, match_case=target.get("match_case", False))
         
         if not matches:
             error_msg = f"Якорь '{after_text}' не найден в документе для вставки таблицы"
@@ -1231,6 +5964,7 @@ class DocumentChangeAgent:
         # Попытка получить paragraph_hint из разных мест
         paragraph_hint = payload.get("paragraph_hint") or target.get("text") or target.get("paragraph_hint")
         comment_text = payload.get("comment_text") or payload.get("text") or change.get("description")
+        is_table_change = payload.get("is_table_change", False)  # Флаг, что изменение было в таблице
 
         if not paragraph_hint or not comment_text:
             logger.warning(
@@ -1244,24 +5978,134 @@ class DocumentChangeAgent:
                           f"Получено: paragraph_hint={paragraph_hint}, comment_text={bool(comment_text)}",
             }
 
-        matches = await mcp_client.find_text_in_document(
-            filename,
-            paragraph_hint,
-            match_case=target.get("match_case", False),
-        )
-        if not matches:
-            return {"success": False, "error": "ANCHOR_NOT_FOUND"}
+        # Если paragraph_index уже указан в payload (например, из table_location), используем его
+        paragraph_index = payload.get("paragraph_index")
+        if paragraph_index is not None and paragraph_index >= 0:
+            logger.info(f"ADD_COMMENT: используется указанный paragraph_index: {paragraph_index}")
+        else:
+            # Иначе ищем текст в документе
+            matches = await self._safe_find_text(filename, paragraph_hint, match_case=target.get("match_case", False))
+            if not matches:
+                logger.warning(f"ADD_COMMENT: текст '{paragraph_hint[:50]}...' не найден в документе")
+                return {"success": False, "error": "ANCHOR_NOT_FOUND", "message": f"Текст '{paragraph_hint[:50]}...' не найден"}
 
-        paragraph_index = matches[0].paragraph_index
-        comment_id = await mcp_client.add_comment(
-            filename,
-            paragraph_index,
-            comment_text,
-        )
-        if not comment_id:
-            return {"success": False, "error": "COMMENT_FAILED"}
-
-        return {"success": True, "paragraph_index": paragraph_index, "comment_id": comment_id}
+            # Ищем первый match, который не в таблице (paragraph_index != -1)
+            paragraph_index = -1
+            for match in matches:
+                if hasattr(match, 'paragraph_index') and match.paragraph_index != -1:
+                    paragraph_index = match.paragraph_index
+                    logger.info(f"ADD_COMMENT: найден параграф {paragraph_index} с текстом")
+                    break
+            
+            # Если все matches в таблицах, используем первый
+            if paragraph_index == -1:
+                paragraph_index = matches[0].paragraph_index
+            
+            # Если текст найден в таблице (paragraph_index = -1) или изменение было в таблице, ищем параграф ПЕРЕД таблицей
+            if paragraph_index == -1 or is_table_change:
+                logger.info(f"ADD_COMMENT: текст найден в таблице, ищем параграф ПЕРЕД таблицей")
+                doc = Document(filename)
+                
+                # Получаем информацию о таблице из matches
+                table_match = None
+                for match in matches:
+                    if hasattr(match, 'paragraph_index') and match.paragraph_index == -1:
+                        table_match = match
+                        break
+                
+                # Если есть информация о таблице, используем её для поиска
+                if table_match and hasattr(table_match, 'location'):
+                    location = table_match.location
+                    logger.info(f"ADD_COMMENT: информация о таблице из match: {location}")
+                    
+                    # Извлекаем номер таблицы из location (например, "Table 0")
+                    import re
+                    table_num_match = re.search(r'Table\s+(\d+)', location)
+                    if table_num_match:
+                        table_num = int(table_num_match.group(1))
+                        logger.info(f"ADD_COMMENT: найден номер таблицы: {table_num}")
+                        
+                        # Ищем параграф перед таблицей
+                        # Для этого нужно найти таблицу в документе и найти параграф перед ней
+                        table_found = False
+                        target_paragraph_index = -1
+                        
+                        # Проходим по элементам документа
+                        para_count = 0
+                        for i, element in enumerate(doc.element.body):
+                            if element.tag.endswith('p'):  # Параграф
+                                para_count += 1
+                            elif element.tag.endswith('tbl'):  # Таблица
+                                # Проверяем, это нужная таблица?
+                                # Считаем таблицы с начала документа
+                                table_idx = sum(1 for j in range(i) if doc.element.body[j].tag.endswith('tbl'))
+                                if table_idx == table_num:
+                                    table_found = True
+                                    # Ищем последний параграф перед этой таблицей
+                                    for j in range(i-1, -1, -1):
+                                        if doc.element.body[j].tag.endswith('p'):
+                                            # Подсчитываем индекс параграфа
+                                            target_paragraph_index = sum(1 for k in range(j+1) if doc.element.body[k].tag.endswith('p')) - 1
+                                            break
+                                    break
+                        
+                        if table_found and target_paragraph_index >= 0:
+                            paragraph_index = target_paragraph_index
+                            logger.info(f"ADD_COMMENT: найден параграф {paragraph_index} ПЕРЕД таблицей {table_num}")
+                        else:
+                            # Если не нашли параграф перед таблицей, ищем ближайший параграф с текстом
+                            for idx, para in enumerate(doc.paragraphs):
+                                if paragraph_hint[:30] in para.text:
+                                    paragraph_index = idx
+                                    logger.info(f"ADD_COMMENT: найден ближайший параграф {idx} с текстом")
+                                    break
+                            
+                            if paragraph_index == -1:
+                                # Если все еще не нашли, используем первый параграф
+                                paragraph_index = 0
+                                logger.warning(f"ADD_COMMENT: не найден параграф перед таблицей, используем первый (0)")
+                    else:
+                        # Если не удалось извлечь номер таблицы, ищем ближайший параграф
+                        for idx, para in enumerate(doc.paragraphs):
+                            if paragraph_hint[:30] in para.text:
+                                paragraph_index = idx
+                                logger.info(f"ADD_COMMENT: найден ближайший параграф {idx}")
+                                break
+                        
+                        if paragraph_index == -1:
+                            paragraph_index = 0
+                            logger.warning(f"ADD_COMMENT: не найден ближайший параграф, используем первый (0)")
+                else:
+                    # Если нет информации о таблице, ищем ближайший параграф
+                    for idx, para in enumerate(doc.paragraphs):
+                        if paragraph_hint[:30] in para.text:
+                            paragraph_index = idx
+                            logger.info(f"ADD_COMMENT: найден ближайший параграф {idx}")
+                            break
+                    
+                    if paragraph_index == -1:
+                        paragraph_index = 0
+                        logger.warning(f"ADD_COMMENT: не найден ближайший параграф, используем первый (0)")
+            else:
+                # Если не таблица и paragraph_index == -1, используем первый match
+                if paragraph_index == -1 and matches:
+                    paragraph_index = matches[0].paragraph_index
+        
+        try:
+            comment_id = await mcp_client.add_comment(
+                filename,
+                paragraph_index,
+                comment_text,
+            )
+            if not comment_id:
+                logger.warning(f"ADD_COMMENT: не удалось добавить комментарий (comment_id=None)")
+                return {"success": False, "error": "COMMENT_FAILED", "message": "Не удалось добавить комментарий"}
+            
+            logger.info(f"ADD_COMMENT: комментарий добавлен успешно (paragraph_index={paragraph_index}, comment_id={comment_id})")
+            return {"success": True, "paragraph_index": paragraph_index, "comment_id": comment_id}
+        except Exception as e:
+            logger.error(f"ADD_COMMENT: ошибка при добавлении комментария: {e}")
+            return {"success": False, "error": "COMMENT_EXCEPTION", "message": str(e)}
 
     async def _add_annotation(
         self,
@@ -1270,18 +6114,40 @@ class DocumentChangeAgent:
         change: Dict[str, Any],
         extra: Optional[str] = None,
     ) -> None:
-        comment_lines = [
-            "━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"[{change.get('change_id', 'CHG')}] {change.get('operation', '')}",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━",
-            change.get("description", "Нет описания"),
-        ]
+        # Создаем компактную аннотацию
+        change_id = change.get('change_id', 'CHG')
+        operation = change.get('operation', '')
+        description = change.get("description", "Нет описания")
+        
+        # Компактный формат аннотации
+        annotation = f"[{change_id}] {operation}: {description}"
         if extra:
-            comment_lines.append(str(extra))
-        comment_lines.append(f"Время: {datetime.now().isoformat()}")
-        comment_lines.append("Статус: SUCCESS")
-        comment_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
-        annotation = "\n".join(comment_lines)
+            annotation += f" | {extra}"
+
+        # Если paragraph_index == -1, это означает, что изменение произошло в таблице.
+        # В этом случае мы добавляем аннотацию ПЕРЕД таблицей.
+        if paragraph_index == -1:
+            doc = Document(filename)
+            table_found = False
+            target_paragraph_index = 0
+            
+            # Ищем первую таблицу и добавляем аннотацию перед ней
+            for i, element in enumerate(doc.element.body):
+                if element.tag.endswith('tbl'): # Если это таблица
+                    table_found = True
+                    # Ищем параграф перед таблицей
+                    for j in range(i-1, -1, -1):
+                        if doc.element.body[j].tag.endswith('p'):
+                            target_paragraph_index = j
+                            break
+                    break
+            
+            if table_found and target_paragraph_index >= 0:
+                paragraph_index = target_paragraph_index
+            else:
+                # Если не удалось найти параграф перед таблицей, добавляем в начало документа
+                paragraph_index = 0
+                logger.warning(f"Не удалось найти параграф перед таблицей для аннотации. Аннотация добавлена в начало документа.")
 
         await mcp_client.add_comment(
             filename,
@@ -1303,6 +6169,87 @@ class DocumentChangeAgent:
             replaced = True
 
         return replaced
+
+    @staticmethod
+    def _replace_in_cell(cell, old: str, new: str) -> bool:
+        """
+        Замена текста в ячейке таблицы с сохранением форматирования.
+        """
+        replaced = False
+        
+        # Проходим по всем параграфам в ячейке
+        for paragraph in cell.paragraphs:
+            # Сохраняем форматирование через runs
+            for run in paragraph.runs:
+                if old in run.text:
+                    # Сохраняем исходное форматирование
+                    original_font = run.font
+                    run.text = run.text.replace(old, new)
+                    replaced = True
+            
+            # Если не нашли в runs, проверяем весь параграф
+        if not replaced and old in paragraph.text:
+            paragraph.text = paragraph.text.replace(old, new)
+            replaced = True
+
+        return replaced
+
+    def _find_text_locally(self, filename: str, text_to_find: str, match_case: bool = True) -> List[MCPTextMatch]:
+        """
+        Локальный поиск текста в документе через python-docx (fallback для MCP).
+        """
+        matches = []
+        try:
+            doc = Document(filename)
+            for idx, paragraph in enumerate(doc.paragraphs):
+                para_text = paragraph.text
+                if not match_case:
+                    para_text = para_text.lower()
+                    search_text = text_to_find.lower()
+                else:
+                    search_text = text_to_find
+                
+                if search_text in para_text:
+                    matches.append(MCPTextMatch(paragraph_index=idx, text=paragraph.text))
+                    logger.debug(f"Найден текст '{text_to_find}' в параграфе {idx}: {paragraph.text[:100]}...")
+        except Exception as e:
+            logger.error(f"Ошибка локального поиска текста: {e}")
+        
+        return matches
+
+    async def _safe_find_text(self, filename: str, text_to_find: str, match_case: bool = True) -> List[MCPTextMatch]:
+        """
+        Безопасный поиск текста с fallback на локальный поиск.
+        """
+        try:
+            return await mcp_client.find_text_in_document(filename, text_to_find, match_case=match_case)
+        except RuntimeError as e:
+            logger.warning(f"MCP сервер недоступен, используем локальный поиск: {e}")
+            return self._find_text_locally(filename, text_to_find, match_case)
+
+    async def _safe_get_document_text(self, filename: str) -> str:
+        """
+        Безопасное получение текста документа с fallback на локальное чтение.
+        """
+        try:
+            return await mcp_client.get_document_text(filename)
+        except RuntimeError as e:
+            logger.warning(f"MCP сервер недоступен, используем локальное чтение: {e}")
+            return self._get_document_text_locally(filename)
+
+    def _get_document_text_locally(self, filename: str) -> str:
+        """
+        Локальное получение текста документа через python-docx.
+        """
+        try:
+            doc = Document(filename)
+            text_parts = []
+            for paragraph in doc.paragraphs:
+                text_parts.append(paragraph.text)
+            return "\n".join(text_parts)
+        except Exception as e:
+            logger.error(f"Ошибка локального чтения документа: {e}")
+            return ""
 
     @staticmethod
     def _is_heading(paragraph: Paragraph) -> bool:

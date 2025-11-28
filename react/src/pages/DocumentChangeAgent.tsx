@@ -7,10 +7,11 @@ import { ProcessingStep } from '@/components/document-change/ProcessingStep';
 import { ResultsStep } from '@/components/document-change/ResultsStep';
 import { InstructionCheck } from '@/components/document-change/InstructionCheck';
 import { FileManagement } from '@/components/document-change/FileManagement';
+import OnlineTranslator from '@/components/document-change/OnlineTranslator';
 import { useDocumentChange } from '@/hooks/useDocumentChange';
 import { apiClient } from '@/lib/api';
 import { toast } from '@/hooks/use-toast';
-import { FileText, RefreshCw, Play, CheckCircle2, FileSearch, FolderOpen } from 'lucide-react';
+import { FileText, RefreshCw, Play, CheckCircle2, FileSearch, FolderOpen, Languages } from 'lucide-react';
 import { HeaderVariant1 } from '@/components/layout/HeaderVariant1';
 import { OperationLogs } from '@/components/document-change/OperationLogs';
 import { useApp } from '@/contexts/AppContext';
@@ -87,7 +88,7 @@ export default function DocumentChangeAgent() {
           <div className="backdrop-blur-xl bg-card/80 rounded-3xl p-8 border border-border/50 shadow-2xl space-y-6">
 
             <Tabs defaultValue="main" className="space-y-6">
-              <TabsList className={`grid w-full ${(isOperator || isSecurityOperator) ? 'grid-cols-4' : 'grid-cols-3'} bg-background/50 backdrop-blur-sm`}>
+              <TabsList className={`grid w-full ${(isOperator || isSecurityOperator) ? 'grid-cols-5' : 'grid-cols-4'} bg-background/50 backdrop-blur-sm`}>
                 <TabsTrigger value="main" className="flex items-center gap-2">
                   <RefreshCw className="h-4 w-4" />
                   Применение изменений
@@ -106,6 +107,10 @@ export default function DocumentChangeAgent() {
                     Логи операций
                   </TabsTrigger>
                 )}
+                <TabsTrigger value="translator" className="flex items-center gap-2">
+                  <Languages className="h-4 w-4" />
+                  Онлайн-переводчик
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="check" className="space-y-6">
@@ -133,6 +138,14 @@ export default function DocumentChangeAgent() {
                   </Card>
                 </TabsContent>
               )}
+
+              <TabsContent value="translator" className="space-y-6">
+                <Card className="bg-background/50 backdrop-blur-sm border-border/50">
+                  <CardContent className="pt-6">
+                    <OnlineTranslator />
+                  </CardContent>
+                </Card>
+              </TabsContent>
 
               <TabsContent value="main" className="space-y-6">
                 {/* Навигация по шагам */}
