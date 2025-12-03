@@ -402,6 +402,23 @@ class ApiClient {
     return response.json();
   }
 
+  // НОВЫЙ ФУНКЦИОНАЛ: Получение полного лога операции
+  async getFullOperationLog(operation_id: string): Promise<any> {
+    const response = await fetch(
+      `${this.baseUrl}/api/operation-logs/${operation_id}/full`,
+      {
+        headers: this.getAuthHeaders(),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(error.detail || 'Ошибка получения полного лога');
+    }
+
+    return response.json();
+  }
+
   // Управление промптами
   async getPrompts(): Promise<any[]> {
     const response = await fetch(`${this.baseUrl}/api/prompts/`, {

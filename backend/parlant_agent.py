@@ -1843,7 +1843,38 @@ class DocumentChangeAgent:
         
         # Проверяем наличие массива changes
         if "changes" not in parsed_json:
-            raise ValueError("JSON должен содержать массив 'changes'")
+            # НОВЫЙ ФУНКЦИОНАЛ: Попытка восстановления структуры
+            logger.warning("⚠️ JSON не содержит массив 'changes', пытаемся восстановить структуру...")
+            # Ищем изменения в других ключах
+            possible_keys = ["change", "modifications", "instructions", "updates", "edits", "items"]
+            found = False
+            for key in possible_keys:
+                if key in parsed_json and isinstance(parsed_json[key], list):
+                    parsed_json["changes"] = parsed_json[key]
+                    logger.info(f"✅ Восстановлено: найден массив изменений в ключе '{key}'")
+                    found = True
+                    break
+            
+            # Если не нашли в других ключах, проверяем верхний уровень
+            if not found:
+                # Проверяем, может быть все ключи верхнего уровня - это изменения
+                all_items = []
+                for key, value in parsed_json.items():
+                    if isinstance(value, dict) and ("operation" in value or "description" in value):
+                        all_items.append(value)
+                    elif isinstance(value, list):
+                        # Может быть вложенный массив
+                        for item in value:
+                            if isinstance(item, dict) and ("operation" in item or "description" in item):
+                                all_items.append(item)
+                
+                if all_items:
+                    parsed_json["changes"] = all_items
+                    logger.info(f"✅ Восстановлено: найдено {len(all_items)} объектов изменений на верхнем уровне")
+                else:
+                    # Последняя попытка - создаем пустой массив
+                    logger.warning("⚠️ Не удалось найти изменения, создаем пустой массив")
+                    parsed_json["changes"] = []
         
         changes = parsed_json["changes"]
         if not isinstance(changes, list):
@@ -1865,6 +1896,161 @@ class DocumentChangeAgent:
         logger.info(f"✅ JSON валидирован: {len(fixed_changes)} изменений")
         
         return parsed_json
+    
+    async def _recover_json_structure(
+        self, 
+        parsed: Any, 
+        original_content: str, 
+        changes_text: str
+    ) -> Dict[str, Any]:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Восстановление структуры JSON когда отсутствует массив 'changes'.
+        
+        Пытается восстановить правильную структуру JSON:
+        1. Если parsed - список, оборачивает в {"changes": [...]}
+        2. Если изменения в других ключах, переименовывает
+        3. Если структура неправильная, пытается извлечь из текста
+        
+        Args:
+            parsed: Распарсенный JSON
+            original_content: Оригинальный текст ответа LLM
+            changes_text: Исходный текст инструкций
+            
+        Returns:
+            Восстановленный JSON с правильной структурой
+        """
+        logger.info("🔧 Восстановление структуры JSON...")
+        
+        # Если parsed - список, оборачиваем в структуру
+        if isinstance(parsed, list):
+            logger.info("   ✅ Найден список, оборачиваем в структуру")
+            return {"changes": parsed}
+        
+        # Если parsed - словарь, проверяем структуру
+        if isinstance(parsed, dict):
+            # Проверяем наличие ключа changes
+            if "changes" in parsed:
+                return parsed
+            
+            # Ищем изменения в других ключах
+            possible_keys = ["change", "modifications", "instructions", "updates", "edits", "items"]
+            for key in possible_keys:
+                if key in parsed and isinstance(parsed[key], list):
+                    logger.info(f"   ✅ Найден массив изменений в ключе '{key}', переименовываем в 'changes'")
+                    parsed["changes"] = parsed[key]
+                    return parsed
+            
+            # Проверяем, может быть все ключи верхнего уровня - это изменения
+            all_items = []
+            for key, value in parsed.items():
+                if isinstance(value, dict) and ("operation" in value or "description" in value):
+                    all_items.append(value)
+            
+            if all_items:
+                logger.info(f"   ✅ Найдено {len(all_items)} объектов изменений на верхнем уровне")
+                return {"changes": all_items}
+        
+        # Если ничего не помогло, возвращаем как есть
+        logger.warning("   ⚠️ Не удалось автоматически восстановить структуру")
+        return parsed if isinstance(parsed, dict) else {"changes": []}
+    
+    async def _extract_changes_from_text_directly(
+        self, 
+        llm_response_text: str, 
+        changes_text: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Прямое извлечение изменений из текста ответа LLM.
+        
+        Когда JSON не парсится или имеет неправильную структуру,
+        пытается найти объекты изменений напрямую в тексте.
+        
+        Args:
+            llm_response_text: Текст ответа от LLM
+            changes_text: Исходный текст инструкций
+            
+        Returns:
+            Словарь с массивом changes или None
+        """
+        logger.info("🔍 Прямое извлечение изменений из текста...")
+        
+        import re
+        
+        changes = []
+        
+        # Стратегия 1: Ищем JSON объекты с полями change_id, operation, description
+        json_object_pattern = r'\{\s*["\']?change_id["\']?\s*:\s*["\']([^"\']+)["\']'
+        matches = re.finditer(json_object_pattern, llm_response_text, re.IGNORECASE)
+        
+        for match in matches:
+            start_pos = match.start()
+            # Пытаемся найти полный JSON объект начиная с этой позиции
+            brace_count = 0
+            in_string = False
+            escape_next = False
+            obj_start = start_pos
+            
+            for i in range(start_pos, len(llm_response_text)):
+                char = llm_response_text[i]
+                
+                if escape_next:
+                    escape_next = False
+                    continue
+                
+                if char == '\\':
+                    escape_next = True
+                    continue
+                
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            # Найден полный объект
+                            obj_text = llm_response_text[obj_start:i+1]
+                            try:
+                                change_obj = json.loads(obj_text)
+                                if isinstance(change_obj, dict) and ("operation" in change_obj or "description" in change_obj):
+                                    changes.append(change_obj)
+                                    logger.info(f"   ✅ Извлечено изменение: {change_obj.get('change_id', 'N/A')}")
+                            except json.JSONDecodeError:
+                                pass
+                            break
+        
+        # Стратегия 2: Ищем структурированные блоки текста
+        if not changes:
+            # Пытаемся найти изменения по описанию
+            description_pattern = r'["\']?description["\']?\s*:\s*["\']([^"\']+)["\']'
+            desc_matches = re.finditer(description_pattern, llm_response_text, re.IGNORECASE)
+            
+            for desc_match in desc_matches:
+                # Ищем объект, содержащий это описание
+                start = max(0, desc_match.start() - 200)
+                end = min(len(llm_response_text), desc_match.end() + 500)
+                context = llm_response_text[start:end]
+                
+                # Пытаемся извлечь JSON объект из контекста
+                json_obj_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', context, re.DOTALL)
+                if json_obj_match:
+                    try:
+                        change_obj = json.loads(json_obj_match.group(0))
+                        if isinstance(change_obj, dict):
+                            changes.append(change_obj)
+                            logger.info(f"   ✅ Извлечено изменение по описанию")
+                    except json.JSONDecodeError:
+                        pass
+        
+        if changes:
+            logger.info(f"✅ Найдено {len(changes)} изменений при прямом извлечении")
+            return {"changes": changes}
+        
+        logger.warning("   ❌ Не удалось извлечь изменения напрямую из текста")
+        return None
     
     def _fix_change_object(self, change: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
         """
@@ -2185,6 +2371,11 @@ class DocumentChangeAgent:
         # Сначала проверяем специальные случаи: "Удалить пункт X", "Изложить пункт X"
         description_lower = description.lower()
         
+        # ВАЖНО: Сначала проверяем наличие конкретного текста в кавычках (слова, фразы)
+        # Это нужно, чтобы отличить "Изложить слова «...» в пункте X" от "Изложить пункт X в новой редакции"
+        has_specific_text = any(keyword in description_lower for keyword in ["слова", "фразу", "строку", "текст"]) and \
+                           any(quote in description for quote in ['«', '"', "'", '"'])
+        
         # Для "Удалить пункт X" - возвращаем номер пункта с точкой
         if "удалить" in description_lower and "пункт" in description_lower:
             paragraph_num_match = re.search(r'пункт[е]?\s+(\d+)', description_lower)
@@ -2195,18 +2386,23 @@ class DocumentChangeAgent:
                 return result
         
         # Для "Изложить пункт X в новой редакции" - возвращаем номер пункта с точкой
-        if "изложить" in description_lower and "пункт" in description_lower and "редакции" in description_lower:
+        # НО: ТОЛЬКО если НЕТ конкретного текста в кавычках (слова, фразы)
+        # Если есть "слова «...»" или "фразу «...»", это замена конкретного текста, а не полная замена пункта
+        if not has_specific_text and "изложить" in description_lower and "пункт" in description_lower and "редакции" in description_lower:
             paragraph_num_match = re.search(r'пункт[е]?\s+(\d+)', description_lower)
             if paragraph_num_match:
                 paragraph_num = paragraph_num_match.group(1)
                 result = f"{paragraph_num}."
-                logger.info(f"🎯 Извлечен номер пункта для замены: '{result}'")
+                logger.info(f"🎯 Извлечен номер пункта для полной замены пункта: '{result}' (без конкретного текста)")
                 return result
         
         # Расширенные паттерны для извлечения текста
         patterns = [
-            # Универсальные паттерны для пунктов
+            # Универсальные паттерны для пунктов - разные порядки слов
             r'пункте\s+\d+\s+слова\s*[«"](.*?)[»"]',  # В пункте N слова «текст»
+            r'слова\s*[«"](.*?)[»"]\s+в\s+пункте\s+\d+',  # слова «текст» в пункте N
+            r'слова\s*[«"](.*?)[»"]\s+пункте\s+\d+',  # слова «текст» пункте N
+            r'изложить\s+слова\s*[«"](.*?)[»"]',  # изложить слова «текст»
             
             # Основные паттерны с контекстом
             r'строку\s*[«"](.*?)[»"]',  # строку «текст»
@@ -2369,9 +2565,11 @@ class DocumentChangeAgent:
         Оптимизирует порядок операций для предотвращения конфликтов.
         
         Правила оптимизации:
-        1. Глобальные замены (по всему тексту) - ПОСЛЕДНИМИ
-        2. Локальные изменения в таблицах - ПЕРВЫМИ
-        3. Локальные изменения в пунктах - ВТОРЫМИ
+        1. Локальные изменения в таблицах - ПЕРВЫМИ
+        2. Локальные изменения в пунктах - ВТОРЫМИ
+        3. Глобальные замены - ПОСЛЕДНИМИ, НО:
+           - Если локальное изменение содержит текст, который изменяется глобальной заменой,
+             то локальное изменение должно быть выполнено ДО глобальной замены
         
         Args:
             changes: Список изменений
@@ -2388,11 +2586,14 @@ class DocumentChangeAgent:
         
         for change in changes:
             description = change.get("description", "").lower()
+            target_text = change.get("target", {}).get("text", "")
             
             # Определяем тип изменения
-            if any(keyword in description for keyword in ["по всему тексту", "по всему документу", "везде в документе"]):
+            is_global = any(keyword in description for keyword in ["по всему тексту", "по всему документу", "везде в документе"]) or change.get("target", {}).get("replace_all", False)
+            
+            if is_global:
                 global_changes.append(change)
-                logger.info(f"   🌍 Глобальное изменение: {change.get('change_id', 'N/A')}")
+                logger.info(f"   🌍 Глобальное изменение: {change.get('change_id', 'N/A')} (заменяет '{target_text}')")
             elif "таблице" in description:
                 table_changes.append(change)
                 logger.info(f"   📊 Изменение в таблице: {change.get('change_id', 'N/A')}")
@@ -2403,10 +2604,83 @@ class DocumentChangeAgent:
                 other_changes.append(change)
                 logger.info(f"   ❓ Другое изменение: {change.get('change_id', 'N/A')}")
         
-        # Оптимальный порядок: таблицы → пункты → другие → глобальные
-        optimized = table_changes + paragraph_changes + other_changes + global_changes
+        # НОВЫЙ ФУНКЦИОНАЛ: Проверяем зависимости между изменениями
+        # Если локальное изменение использует текст, который изменяется глобальной заменой,
+        # то локальное изменение должно быть выполнено ДО глобальной замены
+        global_target_texts = {}  # Словарь: текст для замены -> глобальное изменение
+        for global_change in global_changes:
+            target_text = global_change.get("target", {}).get("text", "")
+            if target_text:
+                global_target_texts[target_text.lower()] = global_change
+        
+        # Разделяем локальные изменения на зависимые и независимые
+        dependent_local_changes = []  # Зависят от глобальных замен (должны быть ДО них)
+        independent_local_changes = []  # Не зависят (могут быть до или после)
+        
+        all_local_changes = table_changes + paragraph_changes + other_changes
+        for local_change in all_local_changes:
+            target_text = local_change.get("target", {}).get("text", "")
+            description = local_change.get("description", "").lower()
+            payload_new_text = local_change.get("payload", {}).get("new_text", "").lower()
+            # Также проверяем исходный target_text из описания (может быть указан в кавычках)
+            import re
+            quoted_texts = re.findall(r'[«"](.*?)[»"]', description)
+            
+            # Проверяем, содержит ли локальное изменение текст, который изменяется глобальной заменой
+            is_dependent = False
+            if target_text:
+                target_lower = target_text.lower()
+                # Проверяем, используется ли этот текст в глобальной замене
+                for global_target, global_change in global_target_texts.items():
+                    if global_target in target_lower or target_lower in global_target:
+                        is_dependent = True
+                        logger.info(f"   ⚠️ Найдена зависимость: {local_change.get('change_id', 'N/A')} зависит от глобальной замены {global_change.get('change_id', 'N/A')}")
+                        logger.info(f"      Локальное: '{target_text}' может быть изменено глобальной заменой '{global_target}'")
+                        break
+            
+            # Проверяем описание на наличие текста, который может быть изменен глобальной заменой
+            if not is_dependent:
+                for global_target, global_change in global_target_texts.items():
+                    if global_target in description:
+                        is_dependent = True
+                        logger.info(f"   ⚠️ Найдена зависимость (в описании): {local_change.get('change_id', 'N/A')} зависит от глобальной замены {global_change.get('change_id', 'N/A')}")
+                        logger.info(f"      Описание содержит '{global_target}', который изменяется глобальной заменой")
+                        break
+            
+            # Проверяем тексты в кавычках из описания
+            if not is_dependent:
+                for quoted_text in quoted_texts:
+                    quoted_lower = quoted_text.lower()
+                    for global_target, global_change in global_target_texts.items():
+                        if global_target in quoted_lower or quoted_lower in global_target:
+                            is_dependent = True
+                            logger.info(f"   ⚠️ Найдена зависимость (в кавычках описания): {local_change.get('change_id', 'N/A')} зависит от глобальной замены {global_change.get('change_id', 'N/A')}")
+                            logger.info(f"      Текст в кавычках '{quoted_text}' содержит '{global_target}', который изменяется глобальной заменой")
+                            break
+                    if is_dependent:
+                        break
+            
+            # Проверяем payload.new_text (может содержать исходный текст для замены)
+            if not is_dependent and payload_new_text:
+                for global_target, global_change in global_target_texts.items():
+                    if global_target in payload_new_text:
+                        is_dependent = True
+                        logger.info(f"   ⚠️ Найдена зависимость (в payload): {local_change.get('change_id', 'N/A')} зависит от глобальной замены {global_change.get('change_id', 'N/A')}")
+                        logger.info(f"      Payload содержит '{global_target}', который изменяется глобальной заменой")
+                        break
+            
+            if is_dependent:
+                dependent_local_changes.append(local_change)
+            else:
+                independent_local_changes.append(local_change)
+        
+        # Оптимальный порядок: зависимые локальные → независимые локальные → глобальные
+        optimized = dependent_local_changes + independent_local_changes + global_changes
         
         logger.info(f"📋 ОПТИМИЗИРОВАННЫЙ ПОРЯДОК:")
+        logger.info(f"   Зависимые локальные изменения: {len(dependent_local_changes)}")
+        logger.info(f"   Независимые локальные изменения: {len(independent_local_changes)}")
+        logger.info(f"   Глобальные изменения: {len(global_changes)}")
         for i, change in enumerate(optimized, 1):
             logger.info(f"   {i}. {change.get('change_id', 'N/A')}: {change.get('description', 'N/A')[:50]}...")
         
@@ -2691,15 +2965,18 @@ class DocumentChangeAgent:
         # Сначала выполняем стандартный парсинг
         changes, tokens_info = await self._parse_changes_with_llm(changes_text, initial_changes)
         
-        # ОТКЛЮЧЕНО: Сохраняем исходный порядок инструкций из файла
-        # changes = self._analyze_operation_order(changes, changes_text)
-        # КРИТИЧЕСКИ ВАЖНО: Анализируем порядок операций для предотвращения конфликтов
-        optimized_changes = self._optimize_operation_order(changes)
-        if len(optimized_changes) != len(changes):
-            logger.warning(f"⚠️ Количество операций изменилось при оптимизации: {len(changes)} → {len(optimized_changes)}")
-        else:
-            changes = optimized_changes
-            logger.info("📋 ПОРЯДОК ОПЕРАЦИЙ: Оптимизирован для предотвращения конфликтов")
+        # КРИТИЧЕСКИ ВАЖНО: Сохраняем исходный порядок инструкций из файла
+        # Изменения должны выполняться строго в том порядке, в котором они указаны в файле изменений
+        logger.info(f"📋 ПОРЯДОК ОПЕРАЦИЙ: Сохранен исходный порядок из файла ({len(changes)} изменений)")
+        for i, change in enumerate(changes, 1):
+            change_id = change.get("change_id", f"CHG-{i:03d}")
+            description = change.get("description", "N/A")
+            logger.info(f"   {i}. {change_id}: {description[:60]}...")
+        
+        # ОТКЛЮЧЕНО: Оптимизация порядка операций - изменения выполняются в исходном порядке
+        # Если в будущем понадобится умная оптимизация, можно включить с учетом зависимостей:
+        # optimized_changes = self._optimize_operation_order(changes)
+        # Но только если пользователь явно запросит оптимизацию
         
         # Затем анализируем контекст каждой инструкции и корректируем операции
         enhanced_changes = []
@@ -2946,9 +3223,11 @@ class DocumentChangeAgent:
         # Попытка парсинга JSON
         try:
             parsed = json.loads(content_cleaned)
+            # НОВЫЙ ФУНКЦИОНАЛ: Попытка восстановления структуры JSON перед валидацией
+            parsed = await self._recover_json_structure(parsed, content_cleaned, changes_text)
             # НОВАЯ ВАЛИДАЦИЯ JSON
             parsed = self._validate_and_fix_json(parsed)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             # Логируем проблемный JSON для отладки
             error_pos = e.pos if hasattr(e, 'pos') else None
             if error_pos:
@@ -2966,10 +3245,12 @@ class DocumentChangeAgent:
                 content_fixed = re.sub(r',\s*}', '}', content_cleaned)
                 content_fixed = re.sub(r',\s*]', ']', content_fixed)
                 parsed = json.loads(content_fixed)
+                # НОВЫЙ ФУНКЦИОНАЛ: Попытка восстановления структуры JSON перед валидацией
+                parsed = await self._recover_json_structure(parsed, content_fixed, changes_text)
                 # НОВАЯ ВАЛИДАЦИЯ JSON
                 parsed = self._validate_and_fix_json(parsed)
                 logger.info("JSON исправлен автоматически (удалены trailing commas)")
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError) as e2:
                 # Если не удалось исправить, пробуем извлечь JSON из текста
                 try:
                     # Ищем JSON объект в тексте
@@ -2977,21 +3258,50 @@ class DocumentChangeAgent:
                     json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content_cleaned, re.DOTALL)
                     if json_match:
                         parsed = json.loads(json_match.group(0))
+                        # НОВЫЙ ФУНКЦИОНАЛ: Попытка восстановления структуры JSON перед валидацией
+                        parsed = await self._recover_json_structure(parsed, json_match.group(0), changes_text)
                         # НОВАЯ ВАЛИДАЦИЯ JSON
                         parsed = self._validate_and_fix_json(parsed)
                         logger.info("JSON извлечен из текста")
                     else:
+                        # НОВЫЙ ФУНКЦИОНАЛ: Последняя попытка - извлечь изменения напрямую из текста
+                        logger.info("🔧 Попытка прямого извлечения изменений из текста...")
+                        try:
+                            recovered_parsed = await self._extract_changes_from_text_directly(content_cleaned, changes_text)
+                            if recovered_parsed and recovered_parsed.get("changes"):
+                                parsed = recovered_parsed
+                                logger.info("✅ Изменения успешно извлечены из текста напрямую")
+                            else:
+                                raise RuntimeError("Не удалось извлечь изменения")
+                        except Exception as recover_error:
+                            logger.warning(f"Не удалось извлечь изменения напрямую: {recover_error}")
+                            raise RuntimeError(
+                                f"Не удалось распарсить JSON от LLM. Ошибка: {str(e)}. "
+                                f"Позиция: {error_pos}. "
+                                f"Попробуйте упростить инструкции или разбить их на части."
+                            ) from e
                         raise RuntimeError(
                             f"Не удалось распарсить JSON от LLM. Ошибка: {str(e)}. "
                             f"Позиция: {error_pos}. "
                             f"Попробуйте упростить инструкции или разбить их на части."
                         ) from e
-                except (json.JSONDecodeError, AttributeError):
-                    raise RuntimeError(
-                        f"Не удалось распарсить JSON от LLM. Ошибка: {str(e)}. "
-                        f"Позиция: {error_pos}. "
-                        f"Ответ LLM (первые 1000 символов): {content_cleaned[:1000]}"
-                    ) from e
+                except (json.JSONDecodeError, AttributeError, ValueError) as e3:
+                    # НОВЫЙ ФУНКЦИОНАЛ: Последняя попытка восстановления
+                    logger.info("🔧 Последняя попытка восстановления структуры JSON...")
+                    try:
+                        recovered_parsed = await self._extract_changes_from_text_directly(content_cleaned, changes_text)
+                        if recovered_parsed and recovered_parsed.get("changes"):
+                            parsed = recovered_parsed
+                            logger.info("✅ Изменения успешно восстановлены из текста")
+                        else:
+                            raise RuntimeError("Не удалось восстановить изменения")
+                    except Exception as recover_error:
+                        logger.error(f"Все попытки восстановления JSON провалились: {recover_error}")
+                        raise RuntimeError(
+                            f"Не удалось распарсить JSON от LLM. Ошибка: {str(e)}. "
+                            f"Позиция: {error_pos}. "
+                            f"Ответ LLM (первые 1000 символов): {content_cleaned[:1000]}"
+                        ) from e
         
         changes = parsed.get("changes", [])
 
@@ -3246,9 +3556,12 @@ class DocumentChangeAgent:
             logger.info(f"🎯 Анализ завершен: {len(changes)} изменений")
             logger.info(f"Использовано токенов при парсинге: {tokens_info_parse.get('total_tokens', 0)}")
             
-            # Нумерация изменений
+            # Нумерация изменений с сохранением исходного порядка
+            logger.info("📋 ИСХОДНЫЙ ПОРЯДОК ИЗМЕНЕНИЙ (как указано в файле):")
             for idx, change in enumerate(changes, start=1):
                 change["change_id"] = f"CHG-{idx:03d}"
+                description = change.get("description", "N/A")
+                logger.info(f"   {idx}. {change['change_id']}: {description[:60]}...")
 
             if not changes:
                 logger.warning("Не найдено изменений для применения")
@@ -3266,7 +3579,14 @@ class DocumentChangeAgent:
             results: List[Dict[str, Any]] = []
             total = len(changes)
             
-            logger.info(f"Начало применения {total} изменений")
+            logger.info(f"🚀 Начало последовательного применения {total} изменений в ИСХОДНОМ порядке")
+            logger.info("📋 ПОРЯДОК ВЫПОЛНЕНИЯ:")
+            for idx, change in enumerate(changes, start=1):
+                change_id = change.get("change_id", f"CHG-{idx:03d}")
+                description = change.get("description", "N/A")
+                logger.info(f"   {idx}. {change_id}: {description[:60]}...")
+            
+            # Последовательное выполнение изменений строго в исходном порядке
             for idx, change in enumerate(changes, start=1):
                 change_id = change.get("change_id", f"CHG-{idx:03d}")
                 operation = change.get("operation", "UNKNOWN")
@@ -3285,7 +3605,29 @@ class DocumentChangeAgent:
                         logger.info(f"{change_id}: успешно выполнено")
                     else:
                         error_msg = execution_result.get("details", {}).get("message", "Неизвестная ошибка")
-                        logger.warning(f"{change_id}: ошибка - {error_msg}")
+                        error_type = execution_result.get("details", {}).get("error", "UNKNOWN")
+                        logger.warning(f"{change_id}: ошибка - {error_msg} (тип: {error_type})")
+                        
+                        # НОВЫЙ ФУНКЦИОНАЛ: Дополнительная диагностика для неудачных изменений
+                        if error_type in ["TEXT_NOT_FOUND", "TEXT_NOT_FOUND_IN_PARAGRAPH"]:
+                            logger.info(f"🔍 ДИАГНОСТИКА для {change_id}:")
+                            logger.info(f"   Описание: {change.get('description', 'N/A')}")
+                            logger.info(f"   Target text: {change.get('target', {}).get('text', 'N/A')}")
+                            logger.info(f"   New text: {change.get('payload', {}).get('new_text', 'N/A')}")
+                            logger.info(f"   Operation: {change.get('operation', 'N/A')}")
+                            
+                            # Попытка найти альтернативные варианты текста
+                            target_text = change.get("target", {}).get("text", "")
+                            if target_text:
+                                logger.info(f"   🔍 Поиск альтернативных вариантов для '{target_text}'...")
+                                try:
+                                    alt_matches = await self._safe_find_text(source_file, target_text[:20] if len(target_text) > 20 else target_text, match_case=False)
+                                    if alt_matches:
+                                        logger.info(f"   ✅ Найдено {len(alt_matches)} альтернативных совпадений")
+                                    else:
+                                        logger.info(f"   ❌ Альтернативные совпадения не найдены")
+                                except Exception as e:
+                                    logger.debug(f"   Ошибка при поиске альтернатив: {e}")
 
                 except Exception as exc:  # noqa: BLE001
                     logger.error(f"{change_id}: исключение при выполнении - {exc}", exc_info=True)
@@ -3453,6 +3795,16 @@ class DocumentChangeAgent:
             logger.error(f"{change_id}: исключение при выполнении операции {operation}: {exc}", exc_info=True)
             details = {"success": False, "error": "EXCEPTION", "message": str(exc)}
 
+        # НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка применения изменения при неудаче
+        if not details.get("success") and operation in ["REPLACE_TEXT", "DELETE_PARAGRAPH"]:
+            logger.info(f"🔄 {change_id}: Первая попытка не удалась, пробуем альтернативные стратегии...")
+            retry_details = await self._retry_change_application(filename, change, operation, details)
+            if retry_details.get("success"):
+                logger.info(f"✅ {change_id}: Успешно применено после повторной попытки")
+                details = retry_details
+            else:
+                logger.warning(f"❌ {change_id}: Повторная попытка также не удалась")
+
         result["details"] = details
         result["status"] = "SUCCESS" if details.get("success") else "FAILED"
 
@@ -3471,6 +3823,365 @@ class DocumentChangeAgent:
             )
 
         return result
+    
+    async def _retry_change_application(
+        self,
+        filename: str,
+        change: Dict[str, Any],
+        operation: str,
+        original_details: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка применения изменения с альтернативными стратегиями.
+        
+        Когда первая попытка применения изменения не удалась, пробует альтернативные подходы:
+        1. Для REPLACE_TEXT: пробует различные варианты поиска и замены
+        2. Для DELETE_PARAGRAPH: пробует альтернативные способы поиска параграфа
+        3. Детальное логирование для диагностики
+        
+        Args:
+            filename: Путь к файлу
+            change: Объект изменения
+            operation: Тип операции
+            original_details: Детали первой неудачной попытки
+            
+        Returns:
+            Детали результата повторной попытки
+        """
+        change_id = change.get("change_id", "UNKNOWN")
+        logger.info(f"🔄 ПОВТОРНАЯ ПОПЫТКА для {change_id}: операция {operation}")
+        logger.info(f"   Оригинальная ошибка: {original_details.get('error', 'UNKNOWN')}")
+        logger.info(f"   Сообщение: {original_details.get('message', 'N/A')}")
+        
+        if operation == "REPLACE_TEXT":
+            return await self._retry_replace_text(filename, change, original_details)
+        elif operation == "DELETE_PARAGRAPH":
+            return await self._retry_delete_paragraph(filename, change, original_details)
+        
+        # Для других операций возвращаем оригинальный результат
+        return original_details
+    
+    async def _select_best_match_for_local_change(
+        self,
+        filename: str,
+        matches: List[MCPTextMatch],
+        target_text: str,
+        description: str
+    ) -> Optional[MCPTextMatch]:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Универсальный выбор наиболее подходящего совпадения для локального изменения.
+        
+        Когда найдено несколько совпадений для локального изменения, анализирует контекст каждого
+        совпадения и выбирает наиболее подходящее на основе:
+        1. Ключевых слов из описания в контексте совпадений
+        2. Структурных признаков (заголовки, пункты, разделы)
+        3. Позиции в документе (первые вхождения чаще являются заголовками)
+        4. Схожести контекста с описанием изменения
+        
+        Args:
+            filename: Путь к файлу
+            matches: Список найденных совпадений
+            target_text: Искомый текст
+            description: Описание изменения
+            
+        Returns:
+            Наиболее подходящее совпадение или None, если выбрать не удалось
+        """
+        if len(matches) <= 1:
+            return matches[0] if matches else None
+        
+        logger.info(f"🔍 Анализ {len(matches)} совпадений для выбора наиболее подходящего...")
+        logger.info(f"   Описание: '{description}'")
+        logger.info(f"   Искомый текст: '{target_text}'")
+        
+        try:
+            doc = Document(filename)
+            
+            # Извлекаем ключевые слова из описания (исключая стоп-слова)
+            description_lower = description.lower()
+            stop_words = {'в', 'на', 'из', 'к', 'с', 'для', 'по', 'от', 'за', 'под', 'над', 
+                         'при', 'о', 'об', 'изложить', 'изменить', 'заменить', 'строку', 
+                         'текст', 'новой', 'редакции', 'редакцию', 'пункт', 'пункте', 'глава', 'главе'}
+            
+            description_words = [
+                word for word in description_lower.split() 
+                if len(word) > 2 and word not in stop_words
+            ]
+            
+            logger.info(f"   Ключевые слова из описания: {description_words}")
+            
+            # Оценка каждого совпадения
+            match_scores = []
+            
+            for match_idx, match in enumerate(matches):
+                score = 0
+                para_idx = match.paragraph_index
+                
+                if para_idx >= len(doc.paragraphs):
+                    continue
+                
+                para = doc.paragraphs[para_idx]
+                para_text = para.text
+                
+                # Собираем расширенный контекст: текущий параграф + предыдущий + следующий
+                context_text = para_text.lower()
+                
+                if para_idx > 0:
+                    prev_para_text = doc.paragraphs[para_idx - 1].text.lower()
+                    context_text = prev_para_text + " " + context_text
+                
+                if para_idx < len(doc.paragraphs) - 1:
+                    next_para_text = doc.paragraphs[para_idx + 1].text.lower()
+                    context_text = context_text + " " + next_para_text
+                
+                # Критерий 1: Наличие ключевых слов из описания в контексте
+                words_found = sum(1 for word in description_words if word in context_text)
+                score += words_found * 10
+                
+                # Критерий 2: Проверка на заголовок/главу (обычно в начале строки, короткие параграфы)
+                is_heading_like = (
+                    para_text.strip().startswith(target_text) or
+                    para_text.strip() == target_text or
+                    len(para_text.split()) <= 10
+                )
+                if is_heading_like:
+                    score += 5
+                
+                # Критерий 3: Позиция в документе (первые вхождения чаще являются заголовками)
+                # Чем раньше в документе, тем выше оценка
+                position_score = max(0, (len(doc.paragraphs) - para_idx) / len(doc.paragraphs) * 3)
+                score += position_score
+                
+                # Критерий 4: Точное совпадение с описанием (если есть упоминание номера пункта/главы)
+                import re
+                # Ищем номера в описании
+                numbers_in_desc = re.findall(r'\d+', description)
+                if numbers_in_desc:
+                    # Ищем эти номера в контексте
+                    for num in numbers_in_desc:
+                        if num in para_text or num in (doc.paragraphs[para_idx - 1].text if para_idx > 0 else ""):
+                            score += 15
+                
+                # Критерий 5: Проверка на структурные элементы (нумерация, заголовки)
+                if re.match(r'^\s*\d+[\.\)]\s*', para_text) or re.match(r'^\s*[А-ЯЁ]+\s*\d+', para_text):
+                    # Это может быть пункт или раздел
+                    score += 3
+                
+                match_scores.append((score, match_idx, match, para_text[:50]))
+                logger.info(f"   Совпадение {match_idx + 1} (параграф {para_idx}): оценка {score:.1f}, текст: '{para_text[:50]}...'")
+            
+            if not match_scores:
+                logger.warning("   ⚠️ Не удалось оценить совпадения")
+                # В крайнем случае возвращаем первое совпадение
+                return matches[0] if matches else None
+            
+            # Сортируем по оценке (высшая оценка = лучший выбор)
+            match_scores.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_idx, best_match, best_text = match_scores[0]
+            
+            # Если есть значительная разница в оценках (более 5 баллов), выбираем лучший
+            if len(match_scores) > 1:
+                second_score = match_scores[1][0]
+                if best_score - second_score >= 5:
+                    logger.info(f"   ✅ Выбрано совпадение {best_idx + 1} (разница в оценке: {best_score - second_score:.1f})")
+                    return best_match
+                else:
+                    # Если оценки близки, используем дополнительные критерии
+                    logger.info(f"   ⚠️ Оценки близки (лучшая: {best_score:.1f}, вторая: {second_score:.1f}), используем дополнительные критерии")
+                    
+                    # Предпочитаем первое вхождение, если разница небольшая
+                    first_match = matches[0]
+                    logger.info(f"   ✅ Выбрано первое совпадение как наиболее вероятное для локального изменения")
+                    return first_match
+            
+            logger.info(f"   ✅ Выбрано совпадение {best_idx + 1} с оценкой {best_score:.1f}")
+            return best_match
+            
+        except Exception as e:
+            logger.warning(f"   ⚠️ Ошибка при выборе совпадения: {e}")
+            # В случае ошибки возвращаем первое совпадение
+            return matches[0] if matches else None
+    
+    async def _retry_replace_text(
+        self,
+        filename: str,
+        change: Dict[str, Any],
+        original_details: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка замены текста с альтернативными стратегиями.
+        """
+        change_id = change.get("change_id", "UNKNOWN")
+        target = change.get("target", {})
+        payload = change.get("payload", {})
+        target_text = target.get("text", "")
+        new_text = payload.get("new_text", "")
+        description = change.get("description", "")
+        
+        logger.info(f"🔄 Стратегия 1: Попытка замены через прямое обращение к документу")
+        try:
+            doc = Document(filename)
+            
+            # Стратегия 1: Прямой поиск и замена в параграфах
+            replaced_count = 0
+            for para in doc.paragraphs:
+                para_text = para.text
+                if target_text in para_text:
+                    # Заменяем напрямую в параграфе
+                    para.clear()
+                    para.add_run(para_text.replace(target_text, new_text))
+                    replaced_count += 1
+                    logger.info(f"   ✅ Найдено и заменено в параграфе: '{target_text}' → '{new_text}'")
+            
+            # Стратегия 1.2: Поиск в таблицах
+            if replaced_count == 0:
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            cell_text = cell.text
+                            if target_text in cell_text:
+                                # Заменяем в ячейке
+                                cell.text = cell_text.replace(target_text, new_text)
+                                replaced_count += 1
+                                logger.info(f"   ✅ Найдено и заменено в таблице: '{target_text}' → '{new_text}'")
+            
+            if replaced_count > 0:
+                doc.save(filename)
+                logger.info(f"✅ {change_id}: Успешно применено после повторной попытки ({replaced_count} замен)")
+                return {
+                    "success": True,
+                    "replacements_count": replaced_count,
+                    "retry_method": "direct_document_access"
+                }
+        except Exception as e:
+            logger.warning(f"   ⚠️ Стратегия 1 не удалась: {e}")
+        
+        # Стратегия 2: Попытка через расширенный поиск
+        logger.info(f"🔄 Стратегия 2: Расширенный поиск с различными вариантами")
+        try:
+            # Пробуем найти текст различными способами
+            matches = await self._enhanced_text_search(filename, target_text, description, match_case=False)
+            if matches:
+                logger.info(f"   ✅ Найдено {len(matches)} совпадений через расширенный поиск")
+                doc = Document(filename)
+                replaced_count = 0
+                
+                for match in matches:
+                    para_idx = match.paragraph_index
+                    if para_idx < len(doc.paragraphs):
+                        para = doc.paragraphs[para_idx]
+                        para_text = para.text
+                        if target_text in para_text:
+                            para.clear()
+                            para.add_run(para_text.replace(target_text, new_text))
+                            replaced_count += 1
+                
+                if replaced_count > 0:
+                    doc.save(filename)
+                    logger.info(f"✅ {change_id}: Успешно применено через расширенный поиск ({replaced_count} замен)")
+                    return {
+                        "success": True,
+                        "replacements_count": replaced_count,
+                        "retry_method": "enhanced_search"
+                    }
+        except Exception as e:
+            logger.warning(f"   ⚠️ Стратегия 2 не удалась: {e}")
+        
+        # Стратегия 3: Частичная замена (если текст длинный)
+        if len(target_text) > 10:
+            logger.info(f"🔄 Стратегия 3: Попытка частичной замены")
+            try:
+                words = target_text.split()
+                if len(words) > 2:
+                    # Берем ключевые слова
+                    key_words = " ".join(words[:3])
+                    logger.info(f"   Поиск по ключевым словам: '{key_words}'")
+                    
+                    doc = Document(filename)
+                    replaced_count = 0
+                    
+                    for para in doc.paragraphs:
+                        para_text = para.text
+                        if key_words in para_text and target_text in para_text:
+                            para.clear()
+                            para.add_run(para_text.replace(target_text, new_text))
+                            replaced_count += 1
+                            logger.info(f"   ✅ Частичная замена успешна")
+                    
+                    if replaced_count > 0:
+                        doc.save(filename)
+                        logger.info(f"✅ {change_id}: Успешно применено через частичную замену ({replaced_count} замен)")
+                        return {
+                            "success": True,
+                            "replacements_count": replaced_count,
+                            "retry_method": "partial_replacement"
+                        }
+            except Exception as e:
+                logger.warning(f"   ⚠️ Стратегия 3 не удалась: {e}")
+        
+        logger.warning(f"❌ {change_id}: Все стратегии повторной попытки не удались")
+        return original_details
+    
+    async def _retry_delete_paragraph(
+        self,
+        filename: str,
+        change: Dict[str, Any],
+        original_details: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка удаления параграфа с альтернативными стратегиями.
+        """
+        change_id = change.get("change_id", "UNKNOWN")
+        target = change.get("target", {})
+        target_text = target.get("text", "")
+        description = change.get("description", "")
+        
+        logger.info(f"🔄 Повторная попытка удаления параграфа для {change_id}")
+        
+        try:
+            doc = Document(filename)
+            
+            # Стратегия 1: Прямой поиск по тексту
+            for idx, para in enumerate(doc.paragraphs):
+                para_text = para.text
+                if target_text in para_text or (target_text.isdigit() and target_text in para_text):
+                    # Удаляем параграф
+                    para_element = para._element
+                    para_element.getparent().remove(para_element)
+                    doc.save(filename)
+                    logger.info(f"✅ {change_id}: Параграф успешно удален (индекс {idx})")
+                    return {
+                        "success": True,
+                        "paragraph_index": idx,
+                        "retry_method": "direct_search"
+                    }
+            
+            # Стратегия 2: Поиск по номеру пункта из описания
+            import re
+            punkt_match = re.search(r'пункт[еа]?\s+(\d+)', description, re.IGNORECASE)
+            if punkt_match:
+                punkt_num = punkt_match.group(1)
+                logger.info(f"   Поиск пункта {punkt_num} из описания")
+                
+                for idx, para in enumerate(doc.paragraphs):
+                    para_text = para.text
+                    # Ищем различные форматы номера пункта
+                    if (f"{punkt_num}." in para_text or 
+                        f"{punkt_num})" in para_text or 
+                        f" {punkt_num} " in para_text):
+                        para_element = para._element
+                        para_element.getparent().remove(para_element)
+                        doc.save(filename)
+                        logger.info(f"✅ {change_id}: Параграф удален по номеру пункта (индекс {idx})")
+                        return {
+                            "success": True,
+                            "paragraph_index": idx,
+                            "retry_method": "punkt_number_search"
+                        }
+        except Exception as e:
+            logger.warning(f"   ⚠️ Повторная попытка удаления не удалась: {e}")
+        
+        return original_details
 
     async def _handle_replace_text(self, filename: str, change: Dict[str, Any], changes_file: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -3575,6 +4286,11 @@ class DocumentChangeAgent:
                         break
             
             if not matches:
+                # НОВЫЙ ФУНКЦИОНАЛ: Расширенный поиск текста с различными вариантами
+                logger.info(f"🔍 Расширенный поиск текста '{target_text}' с различными вариантами...")
+                matches = await self._enhanced_text_search(filename, target_text, description, match_case)
+                
+            if not matches:
                 logger.warning(f"Текст '{target_text}' не найден в документе")
                 return {
                     "success": False,
@@ -3595,7 +4311,12 @@ class DocumentChangeAgent:
 
             # Проходим по всем параграфам и заменяем текст
             for idx, para in enumerate(doc.paragraphs):
+                # Пробуем сначала стандартную замену
                 if self._replace_in_paragraph(para, target_text, new_text):
+                    replaced_count += 1
+                    affected_paragraphs.add(idx)
+                # НОВЫЙ ФУНКЦИОНАЛ: Если стандартная не сработала, пробуем надежную
+                elif self._robust_replace_in_paragraph(para, target_text, new_text):
                     replaced_count += 1
                     affected_paragraphs.add(idx)
 
@@ -3645,12 +4366,22 @@ class DocumentChangeAgent:
 
         # Для единичной замены (точное совпадение)
         if len(matches) != 1:
-            return {
-                "success": False,
-                "error": "TEXT_NOT_UNIQUE",
-                "message": f"Ожидалось ровно одно совпадение, найдено: {len(matches)}. "
-                           f"Используйте replace_all=true для массовых замен.",
-            }
+            # НОВЫЙ ФУНКЦИОНАЛ: Универсальная обработка множественных совпадений для локальных изменений
+            logger.info(f"🔍 Найдено {len(matches)} совпадений для локального изменения, пытаемся выбрать наиболее подходящее...")
+            selected_match = await self._select_best_match_for_local_change(filename, matches, target_text, description)
+            
+            if selected_match is not None:
+                logger.info(f"✅ Выбрано наиболее подходящее совпадение (индекс параграфа: {selected_match.paragraph_index})")
+                # Создаем новый список с одним выбранным совпадением
+                matches = [selected_match]
+            else:
+                # Если не удалось выбрать, возвращаем ошибку
+                return {
+                    "success": False,
+                    "error": "TEXT_NOT_UNIQUE",
+                    "message": f"Ожидалось ровно одно совпадение, найдено: {len(matches)}. "
+                               f"Используйте replace_all=true для массовых замен.",
+                }
 
         paragraph_index = matches[0].paragraph_index
         doc = Document(filename)
@@ -3662,23 +4393,374 @@ class DocumentChangeAgent:
                 "message": f"Неверный индекс параграфа: {paragraph_index}",
             }
 
-        replaced = self._replace_in_paragraph(doc.paragraphs[paragraph_index], target_text, new_text)
+        para = doc.paragraphs[paragraph_index]
+        
+        # Инициализируем переменную replaced
+        replaced = False
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Специальная обработка для заголовков/разделов
+        is_heading = self._is_heading(para)
+        # Проверяем описание на наличие явных указаний на замену заголовка/наименования раздела
+        # Важно: применяем специальную обработку только если явно указано, что нужно изменить заголовок/наименование
+        description_lower = description.lower()
+        is_heading_by_description = False
+        
+        # Проверяем явные указания на замену заголовка/наименования
+        explicit_heading_keywords = [
+            "заголовок главы", "заголовок раздела",  # Явные указания на заголовок
+            "наименование раздела", "наименование главы",  # Явные указания на наименование
+            "название раздела", "название главы",  # Явные указания на название
+            "изменить заголовок", "заменить заголовок",  # Изменение заголовка
+            "изменить наименование", "заменить наименование",  # Изменение наименования
+            "изменить название", "заменить название",  # Изменение названия
+            "изложить заголовок", "изложить наименование",  # Изложение заголовка/наименования
+        ]
+        
+        # Проверяем, есть ли явное указание на заголовок/наименование
+        has_explicit_heading_indication = any(
+            keyword in description_lower 
+            for keyword in explicit_heading_keywords
+        )
+        
+        # Проверяем, что описание НЕ говорит о замене внутри главы/раздела (исключаем такие случаи)
+        has_internal_replacement_indication = any(
+            exclusion in description_lower 
+            for exclusion in [
+                "в главе", "в разделе", "в пункте",  # Эти фразы указывают на замену внутри, а не заголовка
+                "текст в главе", "текст в разделе", "текст в",  # Явно не заголовок
+                "строку в главе", "строку в разделе", "строку в",  # Замена строки внутри
+                "слова в главе", "слова в разделе", "слова в",  # Замена слов внутри
+            ]
+        )
+        
+        # Специальная обработка применяется только если:
+        # 1. Есть явное указание на заголовок/наименование И
+        # 2. НЕТ указания на замену внутри главы/раздела
+        is_heading_by_description = has_explicit_heading_indication and not has_internal_replacement_indication
+        
+        if is_heading or is_heading_by_description:
+            logger.info(f"📌 Обнаружен заголовок/раздел (стиль: {para.style.name if para.style else 'N/A'}, по описанию: {is_heading_by_description}), используем специальную обработку")
+            # Для заголовков используем прямую замену через paragraph.text
+            # Это сохранит стиль заголовка, но пересоздаст runs
+            try:
+                para_text = para.text
+                # Проверяем точное совпадение или совпадение без учета регистра
+                text_found = target_text in para_text
+                if not text_found and match_case:
+                    # Пробуем без учета регистра
+                    text_found = target_text.lower() in para_text.lower()
+                
+                if text_found:
+                    # Сохраняем стиль заголовка
+                    heading_style = para.style
+                    # Выполняем замену (с учетом регистра или без)
+                    if target_text in para_text:
+                        new_para_text = para_text.replace(target_text, new_text, 1)
+                    else:
+                        # Замена без учета регистра
+                        import re
+                        pattern = re.escape(target_text)
+                        new_para_text = re.sub(pattern, new_text, para_text, count=1, flags=re.IGNORECASE)
+                    
+                    para.text = new_para_text
+                    # Восстанавливаем стиль заголовка (на случай, если он был потерян)
+                    if heading_style:
+                        para.style = heading_style
+                    
+                    # Проверяем результат
+                    if new_text in para.text:
+                        logger.info(f"✅ Замена в заголовке выполнена успешно")
+                        replaced = True
+                        # Сохраняем документ сразу после успешной замены
+                        doc.save(filename)
+                        
+                        # НОВЫЙ ФУНКЦИОНАЛ: Синхронизация с содержанием (оглавлением)
+                        await self._sync_heading_with_table_of_contents(filename, target_text, new_text, is_heading_change=True)
+                        # Перезагружаем документ для финальной проверки
+                        try:
+                            verify_doc = Document(filename)
+                            if paragraph_index < len(verify_doc.paragraphs):
+                                verify_para = verify_doc.paragraphs[paragraph_index]
+                                if new_text in verify_para.text:
+                                    logger.info(f"✅ Замена в заголовке подтверждена после сохранения")
+                                else:
+                                    logger.warning(f"⚠️ Замена в заголовке не обнаружена после сохранения, пробуем еще раз")
+                                    # Пробуем еще раз прямую замену
+                                    if target_text in verify_para.text:
+                                        verify_para.text = verify_para.text.replace(target_text, new_text, 1)
+                                        if verify_para.style:
+                                            verify_para.style = heading_style
+                                        verify_doc.save(filename)
+                                        logger.info(f"✅ Повторная замена в заголовке выполнена")
+                        except Exception as verify_e:
+                            logger.warning(f"⚠️ Не удалось проверить замену в заголовке после сохранения: {verify_e}")
+                    else:
+                        logger.warning(f"⚠️ Замена в заголовке не подтверждена")
+                else:
+                    logger.warning(f"⚠️ Текст '{target_text}' не найден в заголовке '{para_text}'")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при замене в заголовке: {e}", exc_info=True)
+        
+        if not replaced:
+            replaced = self._replace_in_paragraph(para, target_text, new_text)
 
         if not replaced:
-            # Пробуем найти в других параграфах
-            for para in doc.paragraphs:
-                if self._replace_in_paragraph(para, target_text, new_text):
+            # НОВЫЙ ФУНКЦИОНАЛ: Попытка надежной замены для текста, разбитого на runs
+            logger.info(f"🔍 Стандартная замена не удалась, пробуем надежную замену для текста, разбитого на runs")
+            replaced = self._robust_replace_in_paragraph(para, target_text, new_text)
+            
+            if replaced:
+                logger.info(f"✅ Надежная замена выполнена успешно")
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Попытка с нормализацией пробелов, если замена не удалась
+        if not replaced:
+            logger.info(f"🔍 Попытка замены с нормализацией пробелов")
+            normalized_target = " ".join(target_text.split())
+            para_text = para.text
+            normalized_para_text = " ".join(para_text.split())
+            
+            if normalized_target in normalized_para_text and normalized_target != target_text:
+                # Находим позицию в нормализованном тексте
+                norm_pos = normalized_para_text.find(normalized_target)
+                # Пробуем заменить в оригинальном тексте
+                if normalized_target in para_text:
+                    try:
+                        para.text = para_text.replace(normalized_target, new_text, 1)
+                        # Проверяем, что замена действительно произошла
+                        if new_text in para.text:
+                            logger.info(f"✅ Замена выполнена с нормализацией пробелов")
+                            replaced = True
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка при замене с нормализацией: {e}")
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Последняя попытка - прямая замена через очистку runs
+        if not replaced and target_text in para.text:
+            logger.info(f"🔍 Последняя попытка: прямая замена через очистку всех runs")
+            try:
+                para_text = para.text
+                new_para_text = para_text.replace(target_text, new_text, 1)
+                
+                # Очищаем все runs
+                for run in para.runs:
+                    run.text = ""
+                
+                # Если есть хотя бы один run, записываем в него
+                if para.runs:
+                    para.runs[0].text = new_para_text
+                else:
+                    # Если нет runs, создаем новый параграф (но это не должно случиться)
+                    para.add_run(new_para_text)
+                
+                # Проверяем результат
+                if new_text in para.text:
+                    logger.info(f"✅ Замена выполнена через очистку runs")
                     replaced = True
-                    break
+            except Exception as e:
+                logger.error(f"❌ Ошибка при замене через очистку runs: {e}")
+        
+        if not replaced:
+            # НОВЫЙ ФУНКЦИОНАЛ: Расширенная попытка замены в других параграфах
+            logger.info(f"🔍 Расширенный поиск для замены текста '{target_text}'")
+            replaced = await self._enhanced_replace_attempt(doc, target_text, new_text, paragraph_index)
+            
+            if not replaced:
+                # Пробуем найти в других параграфах (старая логика)
+                for para in doc.paragraphs:
+                    if self._replace_in_paragraph(para, target_text, new_text):
+                        replaced = True
+                        break
+                    
+                    # НОВЫЙ ФУНКЦИОНАЛ: Также пробуем надежную замену в других параграфах
+                    if self._robust_replace_in_paragraph(para, target_text, new_text):
+                        replaced = True
+                        break
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Попытка замены без учета регистра, если match_case=True и замена не удалась
+        if not replaced and match_case:
+            logger.info(f"🔧 Попытка замены без учета регистра (match_case=True, но замена не удалась)")
+            try:
+                para_text = para.text
+                # Ищем текст без учета регистра
+                if target_text.lower() in para_text.lower():
+                    # Находим точное вхождение (с учетом регистра как в документе)
+                    import re
+                    pattern = re.escape(target_text)
+                    match = re.search(pattern, para_text, re.IGNORECASE)
+                    if match:
+                        actual_text = match.group(0)  # Реальный текст из документа
+                        new_para_text = para_text.replace(actual_text, new_text, 1)
+                        para.text = new_para_text
+                        if new_text in para.text:
+                            logger.info(f"✅ Замена выполнена без учета регистра")
+                            replaced = True
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при замене без учета регистра: {e}")
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Использование MCP replace_text как финальная попытка
+        if not replaced:
+            logger.info(f"🔧 Финальная попытка: использование MCP replace_text для замены '{target_text}'")
+            try:
+                # Сохраняем документ перед вызовом MCP
+                doc.save(filename)
+                
+                # Используем MCP replace_text для замены в указанном параграфе
+                mcp_replaced = await mcp_client.replace_text(
+                    filename=filename,
+                    old_text=target_text,
+                    new_text=new_text,
+                    paragraph_index=paragraph_index
+                )
+                
+                if mcp_replaced:
+                    logger.info(f"✅ Замена выполнена через MCP replace_text")
+                    # Перезагружаем документ и проверяем результат
+                    try:
+                        verify_doc = Document(filename)
+                        if paragraph_index < len(verify_doc.paragraphs):
+                            verify_para_text = verify_doc.paragraphs[paragraph_index].text
+                            if new_text in verify_para_text or target_text not in verify_para_text:
+                                replaced = True
+                                logger.info(f"✅ Замена подтверждена после MCP replace_text")
+                            else:
+                                logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена")
+                        else:
+                            # Проверяем по всему документу
+                            all_text = "\n".join([p.text for p in verify_doc.paragraphs])
+                            if new_text in all_text:
+                                replaced = True
+                                logger.info(f"✅ Замена подтверждена после MCP replace_text (по всему документу)")
+                    except Exception as verify_e:
+                        logger.warning(f"⚠️ Не удалось проверить результат MCP replace_text: {verify_e}")
+                        # Все равно считаем успешным, если MCP вернул True
+                        replaced = True
+                else:
+                    logger.warning(f"⚠️ MCP replace_text не удалась, пробуем без указания параграфа")
+                    # Пробуем без указания конкретного параграфа (глобальная замена)
+                    mcp_replaced = await mcp_client.replace_text(
+                        filename=filename,
+                        old_text=target_text,
+                        new_text=new_text,
+                        paragraph_index=None
+                    )
+                    if mcp_replaced:
+                        logger.info(f"✅ Замена выполнена через MCP replace_text (глобально)")
+                        # Проверяем результат
+                        try:
+                            verify_doc = Document(filename)
+                            all_text = "\n".join([p.text for p in verify_doc.paragraphs])
+                            if new_text in all_text:
+                                replaced = True
+                                logger.info(f"✅ Замена подтверждена после MCP replace_text (глобально)")
+                        except Exception as verify_e:
+                            logger.warning(f"⚠️ Не удалось проверить результат: {verify_e}")
+                            replaced = True
+            except Exception as e:
+                logger.error(f"❌ Ошибка при использовании MCP replace_text: {e}", exc_info=True)
 
+        # НОВЫЙ ФУНКЦИОНАЛ: Проверка, находится ли текст в содержании (оглавлении)
+        # Если текст найден в таблице и это похоже на содержание, синхронизируем с заголовком
+        is_in_table_of_contents = False
+        if not replaced:
+            # Проверяем, может быть текст находится в содержании
+            try:
+                # Ищем текст в таблицах
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            cell_text = cell.text.strip()
+                            if target_text in cell_text or cell_text in target_text:
+                                # Проверяем, похоже ли это на содержание (есть номер страницы или точки)
+                                import re
+                                # Содержание обычно имеет формат: "1. Название ........ 5"
+                                if re.search(r'[. ]+\d+$', cell_text) or re.match(r'^\d+\.', cell_text):
+                                    is_in_table_of_contents = True
+                                    logger.info(f"📋 Обнаружено, что текст находится в содержании (оглавлении)")
+                                    # Выполняем замену в ячейке
+                                    if target_text in cell_text:
+                                        new_cell_text = cell_text.replace(target_text, new_text, 1)
+                                    else:
+                                        # Ячейка содержит только часть, заменяем с сохранением форматирования
+                                        page_match = re.search(r'([. ]+)(\d+)$', cell_text)
+                                        if page_match:
+                                            separator = page_match.group(1)
+                                            page_num = page_match.group(2)
+                                            heading_num_match = re.match(r'^(\d+\.?\s*)', cell_text)
+                                            if heading_num_match:
+                                                heading_num = heading_num_match.group(1)
+                                                new_cell_text = heading_num + new_text.replace(heading_num, '').strip() + separator + page_num
+                                            else:
+                                                new_cell_text = new_text + separator + page_num
+                                        else:
+                                            heading_num_match = re.match(r'^(\d+\.?\s*)', cell_text)
+                                            if heading_num_match:
+                                                heading_num = heading_num_match.group(1)
+                                                new_cell_text = heading_num + new_text.replace(heading_num, '').strip() if heading_num in new_text else heading_num + new_text
+                                            else:
+                                                new_cell_text = new_text
+                                    
+                                    cell.text = new_cell_text
+                                    replaced = True
+                                    doc.save(filename)
+                                    logger.info(f"✅ Замена в содержании выполнена: '{cell_text}' → '{new_cell_text}'")
+                                    
+                                    # Синхронизируем с заголовком раздела
+                                    await self._sync_heading_with_table_of_contents(filename, target_text, new_text, is_heading_change=False)
+                                    break
+                        if is_in_table_of_contents:
+                            break
+                    if is_in_table_of_contents:
+                        break
+            except Exception as toc_e:
+                logger.warning(f"⚠️ Ошибка при проверке содержания: {toc_e}")
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Финальная проверка замены перед сохранением
+        if not replaced:
+            # Последняя попытка: проверяем, может быть текст уже заменен (например, через paragraph.text)
+            final_para_text = para.text
+            if new_text in final_para_text and target_text not in final_para_text:
+                logger.info(f"✅ Текст уже заменен (возможно, через paragraph.text)")
+                replaced = True
+            else:
+                # Еще одна попытка: прямое использование paragraph.text для полной замены
+                logger.info(f"🔧 Последняя попытка: прямая замена через paragraph.text")
+                try:
+                    if target_text in final_para_text:
+                        para.text = final_para_text.replace(target_text, new_text, 1)
+                        # Проверяем сразу после замены
+                        if new_text in para.text:
+                            logger.info(f"✅ Замена выполнена через прямое присваивание paragraph.text")
+                            replaced = True
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при прямой замене через paragraph.text: {e}")
+        
+        # Если все еще не заменено, возвращаем ошибку
         if not replaced:
             return {
                 "success": False,
                 "error": "TEXT_NOT_FOUND_IN_PARAGRAPH",
-                "message": f"Не удалось заменить '{target_text}' в найденном параграфе",
+                "message": f"Не удалось заменить '{target_text}' в найденном параграфе. Испробованы все методы замены.",
             }
 
         doc.save(filename)
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Финальная проверка после сохранения
+        try:
+            # Переоткрываем документ и проверяем, что замена действительно произошла
+            verify_doc = Document(filename)
+            if paragraph_index < len(verify_doc.paragraphs):
+                verify_para_text = verify_doc.paragraphs[paragraph_index].text
+                if new_text not in verify_para_text and target_text in verify_para_text:
+                    logger.warning(f"⚠️ Замена не обнаружена после сохранения, пробуем еще раз...")
+                    # Пробуем еще раз прямую замену
+                    verify_para = verify_doc.paragraphs[paragraph_index]
+                    if target_text in verify_para.text:
+                        verify_para.text = verify_para.text.replace(target_text, new_text, 1)
+                        verify_doc.save(filename)
+                        logger.info(f"✅ Повторная замена выполнена успешно")
+                elif new_text in verify_para_text:
+                    logger.info(f"✅ Замена подтверждена после сохранения")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось проверить замену после сохранения: {e}")
 
         if change.get("annotation", True):
             await self._add_annotation(
@@ -3754,15 +4836,24 @@ class DocumentChangeAgent:
             
             # Если указано название таблицы, сначала ищем его в тексте документа
             table_name_found_in_text = False
+            table_name_paragraph_index = -1  # Позиция названия таблицы в документе
             if table_name:
                 logger.info(f"🔍 Поиск названия таблицы '{table_name}' в тексте документа...")
                 try:
                     # Ищем название таблицы в тексте через MCP
                     matches = await mcp_client.find_text_in_document(filename, table_name, match_case=False)
                     if matches:
+                        # Берем первое вхождение названия таблицы (обычно это заголовок таблицы)
+                        first_match = matches[0]
+                        if hasattr(first_match, 'paragraph_index'):
+                            table_name_paragraph_index = first_match.paragraph_index
+                        elif isinstance(first_match, dict):
+                            table_name_paragraph_index = first_match.get('paragraph_index', -1)
+                        
                         logger.info(f"   ✅ Найдено {len(matches)} упоминаний названия таблицы в тексте")
+                        logger.info(f"   📍 Название найдено в параграфе {table_name_paragraph_index}")
                         table_name_found_in_text = True
-                        logger.info(f"   📍 Название найдено в тексте, ограничиваем поиск таблицами с target_text")
+                        logger.info(f"   📍 Название найдено в тексте, ищем таблицы после этого параграфа")
                     else:
                         logger.info(f"   ⚠️ Название таблицы не найдено в тексте, используем проверку заголовка")
                     
@@ -3772,17 +4863,61 @@ class DocumentChangeAgent:
             
             # Ищем таблицы и анализируем их структуру
             # Если LLM определил целевые таблицы, используем их как приоритет
-            # Если название найдено в тексте, обрабатываем только первую таблицу с target_text
+            # Если название найдено в тексте, обрабатываем только первую таблицу с target_text, которая идет ПОСЛЕ названия
             first_table_processed = False
             table_location = None  # Информация о местоположении замены для аннотаций
+            
+            # НОВЫЙ ФУНКЦИОНАЛ: Предварительный отбор таблиц по позиции относительно названия
+            # Если название таблицы найдено в тексте, собираем все таблицы, которые идут после названия и содержат target_text
+            candidate_tables = []  # Список кандидатов: (table_idx, table_paragraph_index, contains_target)
+            if table_name_found_in_text and table_name_paragraph_index >= 0:
+                logger.info(f"   🔍 Предварительный отбор таблиц по позиции (название в параграфе {table_name_paragraph_index})...")
+                for table_idx, table in enumerate(doc.tables):
+                    table_paragraph_index = self._find_paragraph_for_table(doc, table_idx, after_table=False)
+                    
+                    # Проверяем, что таблица идет ПОСЛЕ названия
+                    if table_paragraph_index >= table_name_paragraph_index:
+                        # Проверяем, содержит ли таблица target_text
+                        contains_target = False
+                        for row in table.rows:
+                            for cell in row.cells:
+                                if target_text in cell.text:
+                                    contains_target = True
+                                    break
+                            if contains_target:
+                                break
+                        
+                        if contains_target:
+                            candidate_tables.append((table_idx, table_paragraph_index, True))
+                            logger.info(f"   ✅ Таблица {table_idx} - кандидат (после названия, содержит target_text, параграф {table_paragraph_index})")
+                        else:
+                            logger.info(f"   ⏭️ Таблица {table_idx} - пропущена (после названия, но не содержит target_text)")
+                    else:
+                        logger.info(f"   ⏭️ Таблица {table_idx} - пропущена (перед названием, параграф {table_paragraph_index})")
+                
+                # Если нашли кандидатов, выбираем первую (ближайшую к названию)
+                if candidate_tables:
+                    # Сортируем по позиции (ближайшая к названию)
+                    candidate_tables.sort(key=lambda x: x[1])
+                    best_table_idx = candidate_tables[0][0]
+                    logger.info(f"   🎯 Выбрана таблица {best_table_idx} как наиболее подходящая (ближайшая к названию)")
             
             for table_idx, table in enumerate(doc.tables):
                 logger.info(f"📊 Анализ таблицы {table_idx}")
                 
                 should_process_this_table = True
                 
-                # ПРИОРИТЕТ 1: Если LLM определил целевые таблицы, обрабатываем только их
-                if llm_target_table_indices is not None:
+                # ПРИОРИТЕТ 0: Если есть предварительно отобранные кандидаты, используем их
+                if candidate_tables:
+                    candidate_indices = [t[0] for t in candidate_tables]
+                    if table_idx not in candidate_indices:
+                        logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не прошла предварительный отбор по позиции)")
+                        continue
+                    else:
+                        logger.info(f"   ✅ Таблица {table_idx} прошла предварительный отбор по позиции")
+                
+                # ПРИОРИТЕТ 1: Если LLM определил целевые таблицы, обрабатываем только их (если нет предварительного отбора)
+                if llm_target_table_indices is not None and not candidate_tables:
                     if table_idx not in llm_target_table_indices:
                         logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (не определена LLM как целевая)")
                         continue
@@ -3792,12 +4927,22 @@ class DocumentChangeAgent:
                 # ПРИОРИТЕТ 2: Проверяем название таблицы (если указано и LLM не определил таблицы)
                 # Если LLM определил таблицы, используем их и пропускаем проверку по названию
                 if table_name and llm_target_table_indices is None:
-                    # Если название найдено в тексте, проверяем только первую таблицу, которая содержит target_text
+                    # Если название найдено в тексте, проверяем только таблицы, которые идут ПОСЛЕ названия
                     if table_name_found_in_text:
-                        # Если уже обработали первую таблицу, пропускаем остальные
+                        # Если уже обработали первую подходящую таблицу, пропускаем остальные
                         if first_table_processed:
                             logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (уже обработана первая таблица с названием)")
                             continue
+                        
+                        # НОВЫЙ ФУНКЦИОНАЛ: Проверяем, что таблица идет ПОСЛЕ названия в документе
+                        if table_name_paragraph_index >= 0:
+                            table_paragraph_index = self._find_paragraph_for_table(doc, table_idx, after_table=False)
+                            
+                            if table_paragraph_index < table_name_paragraph_index:
+                                logger.info(f"   ⏭️ Пропускаем таблицу {table_idx} (находится ДО названия в параграфе {table_name_paragraph_index}, таблица в параграфе {table_paragraph_index})")
+                                continue
+                            else:
+                                logger.info(f"   ✅ Таблица {table_idx} идет ПОСЛЕ названия (название в {table_name_paragraph_index}, таблица в {table_paragraph_index})")
                         
                         # Проверяем, содержит ли эта таблица target_text
                         table_contains_target = False
@@ -7627,6 +8772,177 @@ class DocumentChangeAgent:
         return replaced
 
     @staticmethod
+    def _robust_replace_in_paragraph(paragraph: Paragraph, old: str, new: str) -> bool:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Надежная замена текста в параграфе, работающая с текстом,
+        разбитым на несколько runs.
+        
+        Этот метод:
+        1. Проверяет, есть ли текст целиком в paragraph.text
+        2. Если да, объединяет runs и заменяет текст с сохранением форматирования
+        3. Работает даже когда текст пересекает границы runs
+        
+        Args:
+            paragraph: Параграф для замены
+            old: Текст для замены
+            new: Новый текст
+            
+        Returns:
+            True если замена выполнена, False иначе
+        """
+        # Сначала проверяем, есть ли текст в параграфе
+        para_text = paragraph.text
+        logger.debug(f"🔍 _robust_replace_in_paragraph: ищем '{old}' в параграфе '{para_text[:50]}...'")
+        
+        if old not in para_text:
+            logger.debug(f"   ❌ Текст '{old}' не найден в параграфе")
+            return False
+        
+        try:
+            # Если текст найден, выполняем замену с сохранением форматирования
+            # Стратегия: находим позицию текста в объединенном тексте,
+            # затем заменяем в соответствующих runs
+            
+            # Собираем весь текст из всех runs с сохранением позиций
+            runs_text = []
+            current_pos = 0
+            for run in paragraph.runs:
+                run_text = run.text
+                runs_text.append({
+                    'run': run,
+                    'text': run_text,
+                    'start': current_pos,
+                    'end': current_pos + len(run_text)
+                })
+                current_pos += len(run_text)
+            
+            # Находим позицию текста для замены
+            old_pos = para_text.find(old)
+            if old_pos == -1:
+                return False
+            
+            old_end = old_pos + len(old)
+            
+            # Находим runs, которые нужно изменить
+            affected_runs = []
+            for run_info in runs_text:
+                # Проверяем пересечение
+                if not (run_info['end'] <= old_pos or run_info['start'] >= old_end):
+                    affected_runs.append(run_info)
+            
+            if not affected_runs:
+                return False
+            
+            # Если текст полностью в одном run - простая замена
+            if len(affected_runs) == 1:
+                run_info = affected_runs[0]
+                logger.debug(f"   ✅ Текст найден в одном run, выполняем простую замену")
+                run_info['run'].text = run_info['run'].text.replace(old, new)
+                return True
+            
+            # Если текст пересекает несколько runs - более сложная замена
+            logger.debug(f"   🔧 Текст пересекает {len(affected_runs)} runs, выполняем сложную замену")
+            
+            # Собираем текст из всех affected runs и заменяем там
+            first_run_info = affected_runs[0]
+            last_run_info = affected_runs[-1]
+            
+            # Извлекаем текст из параграфа между началом первого и концом последнего affected run
+            # Это более надежный способ, чем простое объединение runs
+            segment_start = first_run_info['start']
+            segment_end = last_run_info['end']
+            segment_text = para_text[segment_start:segment_end]
+            logger.debug(f"   📍 Сегмент текста (позиции {segment_start}-{segment_end}): '{segment_text[:80]}...'")
+            
+            # Проверяем, что old действительно находится в этом сегменте
+            segment_old_pos = segment_text.find(old)
+            if segment_old_pos == -1:
+                # Если не найдено в сегменте, пробуем найти в полном параграфе и заменить напрямую
+                logger.warning(f"   ⚠️ Текст '{old}' не найден в сегменте, используем fallback через paragraph.text")
+                if old in para_text:
+                    try:
+                        # Используем простую замену через paragraph.text (сохранит форматирование первого run)
+                        new_para_text = para_text.replace(old, new, 1)  # Заменяем только первое вхождение
+                        paragraph.text = new_para_text
+                        # Проверяем результат
+                        if new in paragraph.text:
+                            logger.debug(f"   ✅ Замена выполнена через fallback paragraph.text")
+                            return True
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Ошибка при замене через paragraph.text: {e}, пробуем альтернативный метод")
+                        
+                        # Альтернативный метод: очистка всех runs и запись нового текста в первый
+                        if paragraph.runs:
+                            first_run = paragraph.runs[0]
+                            new_para_text = para_text.replace(old, new, 1)
+                            
+                            # Очищаем все runs
+                            for run in paragraph.runs:
+                                run.text = ""
+                            
+                            # Записываем в первый run
+                            first_run.text = new_para_text
+                            if new in paragraph.text:
+                                logger.debug(f"   ✅ Замена выполнена через альтернативный метод")
+                                return True
+                
+                logger.debug(f"   ❌ Текст не найден даже в полном параграфе")
+                return False
+            
+            # Выполняем замену в сегменте
+            replacement_segment = segment_text[:segment_old_pos] + new + segment_text[segment_old_pos + len(old):]
+            logger.debug(f"   🔄 Замененный сегмент: '{replacement_segment[:80]}...'")
+            
+            # Теперь нужно правильно распределить замененный текст по runs
+            # Простая стратегия: весь замененный текст идет в первый affected run
+            first_run_info['run'].text = replacement_segment
+            # Очищаем остальные affected runs
+            for run_info in affected_runs[1:]:
+                run_info['run'].text = ""
+            
+            logger.debug(f"   ✅ Сложная замена выполнена успешно")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Ошибка в _robust_replace_in_paragraph: {e}, пробуем простую замену")
+            # Fallback: простая замена через paragraph.text
+            if old in paragraph.text:
+                try:
+                    # Пробуем заменить через paragraph.text (это пересоздаст runs)
+                    original_text = paragraph.text
+                    new_para_text = original_text.replace(old, new, 1)  # Заменяем только первое вхождение
+                    paragraph.text = new_para_text
+                    # Проверяем, что замена действительно произошла
+                    if new_para_text in paragraph.text or new in paragraph.text:
+                        logger.debug(f"   ✅ Замена выполнена через paragraph.text (fallback)")
+                        return True
+                except Exception as e2:
+                    logger.error(f"   ❌ Ошибка при замене через paragraph.text: {e2}")
+            
+            # Последняя попытка: прямая работа с текстом через очистку и перезапись
+            if old in paragraph.text:
+                try:
+                    # Получаем первый run и используем его для замены
+                    if paragraph.runs:
+                        # Сохраняем форматирование первого run
+                        first_run = paragraph.runs[0]
+                        original_text = paragraph.text
+                        new_text_final = original_text.replace(old, new, 1)
+                        
+                        # Очищаем все runs
+                        for run in paragraph.runs:
+                            run.text = ""
+                        
+                        # Записываем новый текст в первый run
+                        first_run.text = new_text_final
+                        logger.debug(f"   ✅ Замена выполнена через очистку и перезапись runs")
+                        return True
+                except Exception as e3:
+                    logger.error(f"   ❌ Ошибка при замене через очистку runs: {e3}")
+            
+            return False
+
+    @staticmethod
     def _replace_in_cell(cell, old: str, new: str) -> bool:
         """
         Замена текста в ячейке таблицы с сохранением форматирования.
@@ -7692,6 +9008,358 @@ class DocumentChangeAgent:
         except RuntimeError as e:
             logger.warning(f"MCP сервер недоступен, используем локальное чтение: {e}")
             return self._get_document_text_locally(filename)
+    
+    async def _enhanced_text_search(
+        self, 
+        filename: str, 
+        target_text: str, 
+        description: str, 
+        match_case: bool = False
+    ) -> List[MCPTextMatch]:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Расширенный поиск текста с различными вариантами.
+        
+        Пытается найти текст различными способами:
+        1. Поиск части текста (если target_text длинный)
+        2. Поиск без учета регистра (если match_case=False)
+        3. Поиск с различными вариантами пунктуации
+        4. Поиск в таблицах
+        5. Поиск по ключевым словам из описания
+        
+        Args:
+            filename: Путь к файлу
+            target_text: Искомый текст
+            description: Описание изменения
+            match_case: Учитывать регистр
+            
+        Returns:
+            Список найденных совпадений или пустой список
+        """
+        logger.info(f"🔍 Расширенный поиск: '{target_text}'")
+        
+        # Стратегия 1: Поиск части текста (если текст длинный)
+        if len(target_text) > 20:
+            # Пробуем найти по ключевым словам
+            words = target_text.split()
+            if len(words) > 3:
+                # Берем первые 3-4 слова
+                partial_text = " ".join(words[:4])
+                logger.info(f"   Попытка 1: поиск по части текста '{partial_text}'")
+                matches = await self._safe_find_text(filename, partial_text, match_case=False)
+                if matches:
+                    logger.info(f"   ✅ Найдено по части текста: {len(matches)} совпадений")
+                    return matches
+        
+        # Стратегия 2: Поиск без учета регистра (если еще не пробовали)
+        if match_case:
+            logger.info(f"   Попытка 2: поиск без учета регистра")
+            matches = await self._safe_find_text(filename, target_text, match_case=False)
+            if matches:
+                logger.info(f"   ✅ Найдено без учета регистра: {len(matches)} совпадений")
+                return matches
+        
+        # Стратегия 3: Поиск с различными вариантами пунктуации
+        import re
+        # Удаляем лишние пробелы и пунктуацию для поиска
+        cleaned_text = re.sub(r'[^\w\s]', '', target_text)
+        cleaned_text = " ".join(cleaned_text.split())
+        if cleaned_text != target_text and len(cleaned_text) > 5:
+            logger.info(f"   Попытка 3: поиск очищенного текста '{cleaned_text}'")
+            matches = await self._safe_find_text(filename, cleaned_text, match_case=False)
+            if matches:
+                logger.info(f"   ✅ Найдено по очищенному тексту: {len(matches)} совпадений")
+                return matches
+        
+        # Стратегия 4: Поиск в таблицах (если описание указывает на таблицу)
+        if "таблиц" in description.lower():
+            logger.info(f"   Попытка 4: поиск в таблицах")
+            try:
+                doc = Document(filename)
+                for table_idx, table in enumerate(doc.tables):
+                    for row_idx, row in enumerate(table.rows):
+                        for cell_idx, cell in enumerate(row.cells):
+                            cell_text = cell.text.strip()
+                            if target_text.lower() in cell_text.lower() or cell_text.lower() in target_text.lower():
+                                logger.info(f"   ✅ Найдено в таблице {table_idx}, строка {row_idx}, ячейка {cell_idx}")
+                                # Создаем псевдо-совпадение для таблицы
+                                # Возвращаем пустой список, так как для таблиц используется другая логика
+                                return []
+            except Exception as e:
+                logger.debug(f"   Ошибка при поиске в таблицах: {e}")
+        
+        # Стратегия 5: Поиск по ключевым словам из описания
+        if "пункт" in description.lower():
+            # Извлекаем номер пункта из описания
+            punkt_match = re.search(r'пункт[еа]?\s+(\d+)', description, re.IGNORECASE)
+            if punkt_match:
+                punkt_num = punkt_match.group(1)
+                logger.info(f"   Попытка 5: поиск пункта {punkt_num}")
+                # Пробуем различные форматы номера пункта
+                for variant in [f"{punkt_num}.", f"{punkt_num})", f"{punkt_num} ", f" {punkt_num}."]:
+                    matches = await self._safe_find_text(filename, variant, match_case=False)
+                    if matches:
+                        logger.info(f"   ✅ Найдено по номеру пункта '{variant}': {len(matches)} совпадений")
+                        return matches
+        
+        # Стратегия 6: Поиск по первым словам target_text
+        if len(target_text.split()) > 1:
+            first_words = " ".join(target_text.split()[:2])
+            if len(first_words) > 5:
+                logger.info(f"   Попытка 6: поиск по первым словам '{first_words}'")
+                matches = await self._safe_find_text(filename, first_words, match_case=False)
+                if matches:
+                    logger.info(f"   ✅ Найдено по первым словам: {len(matches)} совпадений")
+                    return matches
+        
+        logger.info(f"   ❌ Расширенный поиск не дал результатов")
+        return []
+    
+    async def _enhanced_replace_attempt(
+        self, 
+        doc: Document, 
+        target_text: str, 
+        new_text: str, 
+        paragraph_index: int
+    ) -> bool:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Расширенная попытка замены текста с различными вариантами.
+        
+        Пытается заменить текст различными способами:
+        1. Замена с нормализацией пробелов
+        2. Замена с учетом различных вариантов пунктуации
+        3. Замена по части текста
+        4. Замена в соседних параграфах
+        
+        Args:
+            doc: Документ
+            target_text: Искомый текст
+            new_text: Новый текст
+            paragraph_index: Индекс параграфа для начала поиска
+            
+        Returns:
+            True если замена выполнена, False иначе
+        """
+        logger.info(f"🔧 Расширенная попытка замены: '{target_text}' → '{new_text}'")
+        
+        # Стратегия 1: Нормализация пробелов
+        normalized_target = " ".join(target_text.split())
+        if normalized_target != target_text:
+            logger.info(f"   Попытка 1: замена с нормализованными пробелами")
+            # Пробуем сначала в указанном параграфе
+            if paragraph_index < len(doc.paragraphs):
+                if self._robust_replace_in_paragraph(doc.paragraphs[paragraph_index], normalized_target, new_text):
+                    logger.info(f"   ✅ Замена выполнена с нормализованными пробелами (надежный метод)")
+                    return True
+            # Затем по всему документу
+            for para in doc.paragraphs:
+                if self._replace_in_paragraph(para, normalized_target, new_text):
+                    logger.info(f"   ✅ Замена выполнена с нормализованными пробелами")
+                    return True
+                # Также пробуем надежную замену
+                if self._robust_replace_in_paragraph(para, normalized_target, new_text):
+                    logger.info(f"   ✅ Замена выполнена с нормализованными пробелами (надежный метод)")
+                    return True
+        
+        # Стратегия 2: Замена с различными вариантами пунктуации
+        import re
+        # Удаляем пунктуацию для поиска
+        cleaned_target = re.sub(r'[^\w\s]', '', target_text)
+        cleaned_target = " ".join(cleaned_target.split())
+        if cleaned_target != target_text and len(cleaned_target) > 5:
+            logger.info(f"   Попытка 2: замена очищенного текста '{cleaned_target}'")
+            # Ищем параграфы, содержащие очищенный текст
+            for para in doc.paragraphs:
+                para_text_cleaned = re.sub(r'[^\w\s]', '', para.text)
+                para_text_cleaned = " ".join(para_text_cleaned.split())
+                if cleaned_target.lower() in para_text_cleaned.lower():
+                    # Пытаемся заменить оригинальный текст в параграфе (сначала надежная замена)
+                    if self._robust_replace_in_paragraph(para, target_text, new_text):
+                        logger.info(f"   ✅ Замена выполнена по очищенному тексту (надежный метод)")
+                        return True
+                    if self._replace_in_paragraph(para, target_text, new_text):
+                        logger.info(f"   ✅ Замена выполнена по очищенному тексту")
+                        return True
+        
+        # Стратегия 3: Замена по части текста (если текст длинный)
+        if len(target_text) > 20:
+            words = target_text.split()
+            if len(words) > 3:
+                # Берем первые 3-4 слова
+                partial_text = " ".join(words[:4])
+                logger.info(f"   Попытка 3: замена по части текста '{partial_text}'")
+                # Ищем параграфы с этой частью текста
+                for para in doc.paragraphs:
+                    if partial_text.lower() in para.text.lower():
+                        # Пытаемся заменить полный текст (сначала надежная замена)
+                        if self._robust_replace_in_paragraph(para, target_text, new_text):
+                            logger.info(f"   ✅ Замена выполнена по части текста (надежный метод)")
+                            return True
+                        if self._replace_in_paragraph(para, target_text, new_text):
+                            logger.info(f"   ✅ Замена выполнена по части текста")
+                            return True
+        
+        # Стратегия 4: Замена в соседних параграфах (вокруг найденного)
+        logger.info(f"   Попытка 4: замена в соседних параграфах (индекс {paragraph_index})")
+        start_idx = max(0, paragraph_index - 2)
+        end_idx = min(len(doc.paragraphs), paragraph_index + 3)
+        for idx in range(start_idx, end_idx):
+            if idx != paragraph_index:
+                # Пробуем сначала надежную замену
+                if self._robust_replace_in_paragraph(doc.paragraphs[idx], target_text, new_text):
+                    logger.info(f"   ✅ Замена выполнена в соседнем параграфе {idx} (надежный метод)")
+                    return True
+                if self._replace_in_paragraph(doc.paragraphs[idx], target_text, new_text):
+                    logger.info(f"   ✅ Замена выполнена в соседнем параграфе {idx}")
+                    return True
+        
+        logger.info(f"   ❌ Расширенная попытка замены не дала результатов")
+        return False
+
+    async def _sync_heading_with_table_of_contents(
+        self,
+        filename: str,
+        old_heading_text: str,
+        new_heading_text: str,
+        is_heading_change: bool = True
+    ) -> None:
+        """
+        НОВЫЙ ФУНКЦИОНАЛ: Синхронизация изменений между заголовками разделов и содержанием (оглавлением).
+        
+        Если изменяется заголовок раздела, обновляется соответствующий элемент в содержании.
+        Если изменяется элемент в содержании, обновляется соответствующий заголовок раздела.
+        
+        Args:
+            filename: Путь к файлу
+            old_heading_text: Старый текст заголовка
+            new_heading_text: Новый текст заголовка
+            is_heading_change: True если изменяется заголовок, False если изменяется содержание
+        """
+        try:
+            logger.info(f"🔄 Синхронизация заголовка с содержанием: '{old_heading_text}' → '{new_heading_text}'")
+            
+            doc = Document(filename)
+            synced_count = 0
+            
+            # Ищем текст в таблицах (содержание обычно хранится в таблицах)
+            for table_idx, table in enumerate(doc.tables):
+                for row_idx, row in enumerate(table.rows):
+                    for cell_idx, cell in enumerate(row.cells):
+                        cell_text = cell.text.strip()
+                        
+                        # Проверяем, содержит ли ячейка старый текст заголовка
+                        # Учитываем, что в содержании может быть только часть текста (без номера или с номером страницы)
+                        if old_heading_text in cell_text or cell_text in old_heading_text:
+                            # Найдено совпадение в ячейке содержания
+                            logger.info(f"   📋 Найдено в содержании (таблица {table_idx}, строка {row_idx}, ячейка {cell_idx}): '{cell_text}'")
+                            
+                            # Определяем, какая часть ячейки содержит заголовок
+                            # В содержании может быть формат: "1. Название раздела ........ 5"
+                            # Или просто: "1. Название раздела"
+                            
+                            # Ищем позицию старого текста в ячейке
+                            if old_heading_text in cell_text:
+                                # Заменяем старый текст на новый
+                                new_cell_text = cell_text.replace(old_heading_text, new_heading_text, 1)
+                                
+                                # Обновляем ячейку (очищаем и записываем новый текст)
+                                cell.text = new_cell_text
+                                synced_count += 1
+                                logger.info(f"   ✅ Обновлено в содержании: '{cell_text}' → '{new_cell_text}'")
+                            elif cell_text in old_heading_text:
+                                # Ячейка содержит только часть заголовка, заменяем всю ячейку
+                                # Сохраняем форматирование (номер страницы, точки и т.д.)
+                                import re
+                                # Пытаемся сохранить номер страницы и точки, если они есть
+                                page_match = re.search(r'([. ]+)(\d+)$', cell_text)
+                                if page_match:
+                                    # Сохраняем разделитель и номер страницы
+                                    separator = page_match.group(1)
+                                    page_num = page_match.group(2)
+                                    # Извлекаем номер раздела из старого текста, если есть
+                                    heading_num_match = re.match(r'^(\d+\.?\s*)', old_heading_text)
+                                    if heading_num_match:
+                                        heading_num = heading_num_match.group(1)
+                                        new_cell_text = heading_num + new_heading_text.replace(heading_num, '').strip() + separator + page_num
+                                    else:
+                                        new_cell_text = new_heading_text + separator + page_num
+                                else:
+                                    # Просто заменяем текст
+                                    heading_num_match = re.match(r'^(\d+\.?\s*)', cell_text)
+                                    if heading_num_match:
+                                        heading_num = heading_num_match.group(1)
+                                        new_cell_text = heading_num + new_heading_text.replace(heading_num, '').strip() if heading_num in new_heading_text else heading_num + new_heading_text
+                                    else:
+                                        new_cell_text = new_heading_text
+                                
+                                cell.text = new_cell_text
+                                synced_count += 1
+                                logger.info(f"   ✅ Обновлено в содержании (с сохранением форматирования): '{cell_text}' → '{new_cell_text}'")
+            
+            # Если изменяется содержание и не найдено в таблицах, ищем в параграфах (на случай полей TOC)
+            if not is_heading_change or synced_count == 0:
+                # Ищем текст в параграфах (для полей TOC или обычного текстового содержания)
+                for para_idx, para in enumerate(doc.paragraphs):
+                    para_text = para.text.strip()
+                    if old_heading_text in para_text:
+                        # Проверяем, не является ли это самим заголовком раздела
+                        if is_heading_change and self._is_heading(para):
+                            continue  # Пропускаем сам заголовок
+                        
+                        # Заменяем в параграфе
+                        new_para_text = para_text.replace(old_heading_text, new_heading_text, 1)
+                        para.text = new_para_text
+                        synced_count += 1
+                        logger.info(f"   ✅ Обновлено в содержании (параграф {para_idx}): '{para_text}' → '{new_para_text}'")
+            
+            # НОВЫЙ ФУНКЦИОНАЛ: Если изменяется содержание, обновляем соответствующий заголовок раздела
+            if not is_heading_change and synced_count > 0:
+                logger.info(f"   🔄 Ищем соответствующий заголовок раздела для синхронизации...")
+                # Ищем заголовок раздела, содержащий старый текст
+                for para_idx, para in enumerate(doc.paragraphs):
+                    if self._is_heading(para):
+                        para_text = para.text.strip()
+                        # Извлекаем текст без номера для сравнения
+                        import re
+                        # Убираем номер раздела из начала для сравнения
+                        heading_text_no_num = re.sub(r'^\d+\.?\s*', '', para_text).strip()
+                        old_text_no_num = re.sub(r'^\d+\.?\s*', '', old_heading_text).strip()
+                        
+                        # Проверяем совпадение текста заголовка
+                        if old_text_no_num in heading_text_no_num or heading_text_no_num in old_text_no_num or old_heading_text in para_text:
+                            logger.info(f"   📌 Найден заголовок раздела (параграф {para_idx}): '{para_text}'")
+                            # Обновляем заголовок
+                            if old_heading_text in para_text:
+                                new_para_text = para_text.replace(old_heading_text, new_heading_text, 1)
+                            else:
+                                # Заменяем с сохранением номера раздела
+                                heading_num_match = re.match(r'^(\d+\.?\s*)', para_text)
+                                if heading_num_match:
+                                    heading_num = heading_num_match.group(1)
+                                    # Убираем номер из нового текста, если он там есть
+                                    new_text_clean = re.sub(r'^\d+\.?\s*', '', new_heading_text).strip()
+                                    new_para_text = heading_num + new_text_clean
+                                else:
+                                    new_para_text = new_heading_text
+                            
+                            heading_style = para.style
+                            para.text = new_para_text
+                            if heading_style:
+                                para.style = heading_style
+                            synced_count += 1
+                            logger.info(f"   ✅ Обновлен заголовок раздела: '{para_text}' → '{new_para_text}'")
+                            break
+            
+            if synced_count > 0:
+                doc.save(filename)
+                if is_heading_change:
+                    logger.info(f"✅ Синхронизация завершена: обновлено {synced_count} элементов в содержании")
+                else:
+                    logger.info(f"✅ Синхронизация завершена: обновлено {synced_count} элементов (содержание и заголовок)")
+            else:
+                logger.info(f"ℹ️ Элементы для синхронизации не найдены")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка при синхронизации с содержанием: {e}", exc_info=True)
 
     def _get_document_text_locally(self, filename: str) -> str:
         """

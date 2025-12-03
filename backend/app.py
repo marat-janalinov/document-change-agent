@@ -1234,6 +1234,45 @@ async def get_operation_logs(
     }
 
 
+@app.get("/api/operation-logs/{operation_id}/full")
+async def get_full_operation_log(
+    operation_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+    db: Session = Depends(get_db_session)
+):
+    """
+    НОВЫЙ ФУНКЦИОНАЛ: Получение полного лога операции со всеми деталями.
+    Включает результаты обработки, детали изменений и полную информацию.
+    """
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Требуется аутентификация")
+    
+    # Получаем базовую информацию из БД
+    log_entry = db.query(OperationLog).filter(OperationLog.operation_id == operation_id).first()
+    if not log_entry:
+        raise HTTPException(status_code=404, detail="Лог операции не найден")
+    
+    # Проверка прав доступа
+    if current_user.role == "executive" and log_entry.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Недостаточно прав доступа")
+    
+    # Получаем полные данные из active_sessions, если они есть
+    full_results = None
+    session_data_found = None
+    for session_id, session_data in active_sessions.items():
+        if session_data.get("operation_id") == operation_id:
+            full_results = session_data.get("results")
+            session_data_found = session_data
+            break
+    
+    # Формируем полный ответ
+    log_dict = log_entry.to_dict()
+    log_dict["full_results"] = full_results
+    log_dict["session_data"] = session_data_found
+    
+    return log_dict
+
+
 # Перевод документов
 @app.post("/api/translate-document")
 async def translate_document(
