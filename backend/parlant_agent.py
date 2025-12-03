@@ -8996,7 +8996,16 @@ class DocumentChangeAgent:
         try:
             return await mcp_client.find_text_in_document(filename, text_to_find, match_case=match_case)
         except RuntimeError as e:
-            logger.warning(f"MCP сервер недоступен, используем локальный поиск: {e}")
+            error_details = str(e)
+            logger.warning(f"⚠️ MCP сервер недоступен при поиске текста, используем локальный поиск: {error_details}")
+            logger.debug(f"   Файл: {filename}, Текст: {text_to_find[:50]}...")
+            return self._find_text_locally(filename, text_to_find, match_case)
+        except Exception as e:
+            # Ловим все типы ошибок (ConnectionError, TimeoutError, etc.)
+            error_type = type(e).__name__
+            error_details = str(e)
+            logger.warning(f"⚠️ Ошибка MCP при поиске текста ({error_type}): {error_details}, используем локальный поиск")
+            logger.debug(f"   Файл: {filename}, Текст: {text_to_find[:50]}...")
             return self._find_text_locally(filename, text_to_find, match_case)
 
     async def _safe_get_document_text(self, filename: str) -> str:
