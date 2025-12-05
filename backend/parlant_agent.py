@@ -4625,13 +4625,17 @@ class DocumentChangeAgent:
             doc = Document(filename)
             para = doc.paragraphs[paragraph_index]
         
+        # Инициализируем переменные для специальной обработки заголовков (до их использования)
+        is_heading = False
+        is_heading_by_description = False
+        description_lower = description.lower() if not replaced else ""
+        
         # НОВЫЙ ФУНКЦИОНАЛ: Специальная обработка для заголовков/разделов (только если локальная не сработала)
         if not replaced:
             is_heading = self._is_heading(para)
-        # Проверяем описание на наличие явных указаний на замену заголовка/наименования раздела
-        # Важно: применяем специальную обработку только если явно указано, что нужно изменить заголовок/наименование
-        description_lower = description.lower()
-        is_heading_by_description = False
+            # Проверяем описание на наличие явных указаний на замену заголовка/наименования раздела
+            # Важно: применяем специальную обработку только если явно указано, что нужно изменить заголовок/наименование
+            description_lower = description.lower()
         
         # Проверяем явные указания на замену заголовка/наименования
         explicit_heading_keywords = [
