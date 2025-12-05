@@ -9267,34 +9267,55 @@ class DocumentChangeAgent:
                 # 1.5. Для длинных текстов (>100 символов) также проверяем частичное совпадение
                 # (текст может быть разбит на несколько параграфов)
                 partial_match = False
-                if not text_found and len(old_text) > 100:
+                if not text_found and len(old_text) > 100 and paragraph_index is not None and paragraph_index >= 0:
                     # Пробуем найти первые 50 символов текста
                     first_part = old_text[:50].strip()
                     if first_part in para_full_text:
                         logger.info(f"🔍 Частичное совпадение найдено в параграфе {actual_para_idx}: первые 50 символов текста присутствуют")
                         partial_match = True
                         # Проверяем соседние параграфы для полного текста
-                        if paragraph_index is not None and paragraph_index >= 0:
-                            # Проверяем следующие параграфы
-                            for next_idx in range(paragraph_index, min(len(doc.paragraphs), paragraph_index + 5)):
-                                next_para = doc.paragraphs[next_idx]
-                                combined_text = para_full_text + " " + next_para.text
-                                if old_text in combined_text or old_text in " ".join(combined_text.split()):
-                                    logger.info(f"✅ Полный текст найден в объединенных параграфах {paragraph_index} и {next_idx}")
-                                    text_found = True
-                                    # Заменяем в первом параграфе, где начинается текст
-                                    if old_text in combined_text:
-                                        new_combined = combined_text.replace(old_text, new_text, 1)
-                                        # Разделяем обратно по параграфам (упрощенный подход)
-                                        paragraph.clear()
-                                        paragraph.add_run(new_combined[:len(para_full_text)])
-                                        if next_idx < len(doc.paragraphs):
-                                            next_para.clear()
-                                            next_para.add_run(new_combined[len(para_full_text):])
-                                        replacements_made += 1
-                                        logger.info(f"✅ Замена выполнена в объединенных параграфах {paragraph_index} и {next_idx}")
-                                        return True
-                                    break
+                        # Проверяем следующие параграфы (до 5 параграфов вперед)
+                        search_start = paragraph_index
+                        search_end = min(len(doc.paragraphs), paragraph_index + 5)
+                        
+                        for check_idx in range(search_start, search_end):
+                            check_para = doc.paragraphs[check_idx]
+                            check_para_text = check_para.text
+                            
+                            # Собираем текст от paragraph_index до check_idx
+                            combined_text_parts = []
+                            for i in range(paragraph_index, check_idx + 1):
+                                combined_text_parts.append(doc.paragraphs[i].text)
+                            combined_text = " ".join(combined_text_parts)
+                            combined_text_normalized = " ".join(combined_text.split())
+                            
+                            # Проверяем, содержится ли полный текст в объединенном тексте
+                            if old_text in combined_text or old_text in combined_text_normalized:
+                                logger.info(f"✅ Полный текст найден в объединенных параграфах {paragraph_index}-{check_idx}")
+                                text_found = True
+                                # Заменяем текст, сохраняя структуру параграфов
+                                if old_text in combined_text:
+                                    new_combined = combined_text.replace(old_text, new_text, 1)
+                                else:
+                                    new_combined = combined_text_normalized.replace(" ".join(old_text.split()), new_text, 1)
+                                
+                                # Если текст заменен в одном параграфе, заменяем его
+                                if check_idx == paragraph_index:
+                                    paragraph.clear()
+                                    paragraph.add_run(new_combined)
+                                else:
+                                    # Если текст разбит на несколько параграфов, заменяем в первом
+                                    # и удаляем остальные (упрощенный подход)
+                                    paragraph.clear()
+                                    paragraph.add_run(new_combined)
+                                    # Удаляем текст из промежуточных параграфов
+                                    for i in range(paragraph_index + 1, check_idx + 1):
+                                        if i < len(doc.paragraphs):
+                                            doc.paragraphs[i].clear()
+                                
+                                replacements_made += 1
+                                logger.info(f"✅ Замена выполнена в объединенных параграфах {paragraph_index}-{check_idx}")
+                                return True
                 
                 # 2. Если не найдено, пробуем нормализацию пробелов
                 if not text_found:
