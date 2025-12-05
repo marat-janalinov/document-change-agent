@@ -5077,11 +5077,19 @@ class DocumentChangeAgent:
                                     
                                     cell.text = new_cell_text
                                     replaced = True
-                                    doc.save(filename)
-                                    logger.info(f"✅ Замена в содержании выполнена: '{cell_text}' → '{new_cell_text}'")
+                                    # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                                    # Файл будет сохранен один раз в конце после всех изменений
+                                    if master_doc is None:
+                                        doc.save(filename)
+                                        logger.info(f"✅ Замена в содержании выполнена: '{cell_text}' → '{new_cell_text}'")
+                                    else:
+                                        logger.info(f"✅ Замена в содержании выполнена в master_doc: '{cell_text}' → '{new_cell_text}'")
                                     
                                     # Синхронизируем с заголовком раздела
-                                    await self._sync_heading_with_table_of_contents(filename, target_text, new_text, is_heading_change=False)
+                                    # Передаем master_doc для синхронизации, чтобы не создавать новый Document()
+                                    await self._sync_heading_with_table_of_contents(
+                                        filename, target_text, new_text, is_heading_change=False, master_doc=master_doc
+                                    )
                                     break
                         if is_in_table_of_contents:
                             break
