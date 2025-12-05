@@ -30,8 +30,11 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
   const [searchResults, setSearchResults] = useState<number[]>([]);
   const [currentSearchIndex, setCurrentSearchIndex] = useState<number>(-1);
   const [searchDialogPosition, setSearchDialogPosition] = useState<{ x: number; y: number } | null>(null);
+  const [searchDialogSize, setSearchDialogSize] = useState<{ width: number; height: number } | null>(null);
   const [isDraggingSearch, setIsDraggingSearch] = useState(false);
+  const [isResizingSearch, setIsResizingSearch] = useState(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [resizeStart, setResizeStart] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const searchDialogRef = useRef<HTMLDivElement>(null);
   const [zoomLevel, setZoomLevel] = useState<number>(100);
   const editorRef = useRef<HTMLDivElement>(null);
@@ -380,47 +383,27 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
     });
   };
 
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (isDraggingSearch && dragStart) {
-        setSearchDialogPosition({
-          x: e.clientX - dragStart.x,
-          y: e.clientY - dragStart.y,
-        });
-      }
-    };
 
-    const handleMouseUp = () => {
-      setIsDraggingSearch(false);
-      setDragStart(null);
-    };
-
-    if (isDraggingSearch) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-    }
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isDraggingSearch, dragStart]);
-
-  // Сброс позиции при закрытии диалога
+  // Сброс позиции и размера при закрытии диалога
   useEffect(() => {
     if (!isSearchOpen) {
       setSearchDialogPosition(null);
-    } else if (!searchDialogPosition) {
-      // При первом открытии центрируем диалог (Radix UI по умолчанию центрирует, но нам нужно это для transform: none)
-      if (searchDialogRef.current) {
-        const rect = searchDialogRef.current.getBoundingClientRect();
-        setSearchDialogPosition({
-          x: window.innerWidth / 2 - rect.width / 2,
-          y: window.innerHeight / 2 - rect.height / 2,
+      setSearchDialogSize(null);
+    } else if (!searchDialogPosition && searchDialogRef.current) {
+      // При первом открытии центрируем диалог
+      const rect = searchDialogRef.current.getBoundingClientRect();
+      setSearchDialogPosition({
+        x: window.innerWidth / 2 - rect.width / 2,
+        y: window.innerHeight / 2 - rect.height / 2,
+      });
+      if (!searchDialogSize) {
+        setSearchDialogSize({
+          width: rect.width,
+          height: rect.height,
         });
       }
     }
-  }, [isSearchOpen, searchDialogPosition]);
+  }, [isSearchOpen, searchDialogPosition, searchDialogSize]);
 
   // Выполнение поиска по нажатию кнопки "Найти"
   const handleSearch = () => {
@@ -839,16 +822,20 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                   searchDialogPosition
                     ? {
                         position: 'fixed',
-                        left: `${Math.max(0, Math.min(searchDialogPosition.x, window.innerWidth - 400))}px`,
-                        top: `${Math.max(0, Math.min(searchDialogPosition.y, window.innerHeight - 300))}px`,
+                        left: `${Math.max(0, Math.min(searchDialogPosition.x, window.innerWidth - (searchDialogSize?.width || 400)))}px`,
+                        top: `${Math.max(0, Math.min(searchDialogPosition.y, window.innerHeight - (searchDialogSize?.height || 300)))}px`,
+                        width: searchDialogSize ? `${searchDialogSize.width}px` : undefined,
+                        height: searchDialogSize ? `${searchDialogSize.height}px` : undefined,
                         transform: 'none',
                         margin: 0,
                         maxWidth: '100vw',
                         maxHeight: '100vh',
+                        resize: 'none',
+                        overflow: 'auto',
                       }
                     : undefined
                 }
-                className={searchDialogPosition ? 'cursor-default' : ''}
+                className={searchDialogPosition ? 'cursor-default relative' : ''}
               >
                 <DialogHeader
                   onMouseDown={handleSearchDialogMouseDown}
@@ -856,6 +843,19 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                 >
                   <DialogTitle>Поиск в документе</DialogTitle>
                 </DialogHeader>
+                {/* Handle для изменения размера */}
+                {searchDialogPosition && (
+                  <div
+                    onMouseDown={handleSearchDialogResizeStart}
+                    className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize bg-border hover:bg-primary/20 transition-colors z-10"
+                    style={{
+                      clipPath: 'polygon(100% 0, 0 100%, 100% 100%)',
+                    }}
+                    title="Изменить размер"
+                  >
+                    <div className="absolute bottom-0.5 right-0.5 w-2 h-2 border-r-2 border-b-2 border-muted-foreground/50" />
+                  </div>
+                )}
                 <div className="space-y-4">
                   <div className="flex gap-2">
                     <Input
