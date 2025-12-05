@@ -773,10 +773,8 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                       value={searchQuery}
                       onChange={(e) => handleSearchInputChange(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
-                          e.preventDefault();
-                          handleSearch();
-                        } else if (e.key === 'Enter' && e.shiftKey) {
+                        // Поиск выполняется только по нажатию кнопки "Найти", не при нажатии Enter
+                        if (e.key === 'Enter' && e.shiftKey) {
                           e.preventDefault();
                           handlePrevResult();
                         }
@@ -847,12 +845,7 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                         placeholder="Введите текст для поиска..."
                         value={searchQuery}
                         onChange={(e) => handleSearchInputChange(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
-                            e.preventDefault();
-                            handleSearch();
-                          }
-                        }}
+                        // Поиск выполняется только по нажатию кнопки "Найти", не при нажатии Enter
                         className="flex-1"
                       />
                       <Button
