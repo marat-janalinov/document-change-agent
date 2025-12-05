@@ -9222,10 +9222,18 @@ class DocumentChangeAgent:
         old_text: str,
         new_text: str,
         paragraph_index: Optional[int] = None,
+        strict_paragraph: bool = False,
     ) -> bool:
         """
         Замена текста в объекте Document напрямую в памяти (без сохранения файла).
         Использует логику из _replace_text_locally_with_tables, но работает с объектом Document.
+        
+        Args:
+            doc: Объект Document для замены
+            old_text: Текст для замены
+            new_text: Новый текст
+            paragraph_index: Индекс параграфа для замены (если указан)
+            strict_paragraph: Если True, поиск строго ограничен указанным параграфом
         """
         try:
             replacements_made = 0
