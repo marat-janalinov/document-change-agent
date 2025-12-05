@@ -4255,9 +4255,72 @@ class DocumentChangeAgent:
         if is_full_paragraph_replacement and not new_text:
             logger.info(f"🔍 ИНСТРУКЦИЯ 'Изложить пункт в новой редакции': новый текст будет извлечен из документа инструкций")
 
-        # ИНТЕЛЛЕКТУАЛЬНАЯ ЛОГИКА ДЛЯ ТАБЛИЦ: Прямой вызов для всех изменений в таблицах
+        # ИНТЕЛЛЕКТУАЛЬНАЯ ЛОГИКА: Сначала определяем, где находится пункт - в таблице или в параграфе
         description_lower = description.lower()
-        is_table_change = "таблице" in description_lower
+        
+        # Проверяем, есть ли в инструкции номер пункта
+        punkt_in_instruction = False
+        punkt_number = None
+        punkt_match = re.search(r'пункт[еа]?\s+(\d+)', description, re.IGNORECASE)
+        if punkt_match:
+            punkt_number = punkt_match.group(1)
+            punkt_in_instruction = True
+            logger.info(f"📋 ОБНАРУЖЕН НОМЕР ПУНКТА в инструкции: {punkt_number}")
+        
+        # Если есть номер пункта, определяем, где он находится - в таблице или в параграфе
+        is_table_change = False
+        if punkt_in_instruction:
+            logger.info(f"🔍 ОПРЕДЕЛЕНИЕ МЕСТОПОЛОЖЕНИЯ ПУНКТА {punkt_number}: проверяем таблицы и параграфы...")
+            
+            # Ищем номер пункта в документе
+            punkt_patterns = [f"{punkt_number}.", f"{punkt_number})", f"{punkt_number}."]
+            punkt_location = None  # "table" или "paragraph" или None
+            
+            try:
+                doc = Document(filename)
+                
+                # Сначала проверяем таблицы - ищем номер пункта в первой ячейке строк
+                for table_idx, table in enumerate(doc.tables):
+                    for row_idx, row in enumerate(table.rows):
+                        if len(row.cells) > 0:
+                            first_cell_text = row.cells[0].text.strip()
+                            # Проверяем, начинается ли первая ячейка с номера пункта
+                            for pattern in punkt_patterns:
+                                if first_cell_text.startswith(pattern) or first_cell_text == punkt_number:
+                                    punkt_location = "table"
+                                    logger.info(f"   ✅ Пункт {punkt_number} найден в ТАБЛИЦЕ {table_idx}, строка {row_idx}")
+                                    is_table_change = True
+                                    break
+                            if punkt_location == "table":
+                                break
+                    if punkt_location == "table":
+                        break
+                
+                # Если не нашли в таблицах, проверяем параграфы
+                if punkt_location != "table":
+                    for para_idx, para in enumerate(doc.paragraphs):
+                        para_text = para.text.strip()
+                        # Проверяем, начинается ли параграф с номера пункта
+                        for pattern in punkt_patterns:
+                            if para_text.startswith(pattern) or para_text == punkt_number:
+                                punkt_location = "paragraph"
+                                logger.info(f"   ✅ Пункт {punkt_number} найден в ПАРАГРАФЕ {para_idx}")
+                                break
+                        if punkt_location == "paragraph":
+                            break
+                
+                if punkt_location:
+                    logger.info(f"📍 МЕСТОПОЛОЖЕНИЕ ПУНКТА {punkt_number}: {punkt_location.upper()}")
+                else:
+                    logger.warning(f"⚠️ Пункт {punkt_number} не найден ни в таблицах, ни в параграфах")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при определении местоположения пункта: {e}")
+                # Fallback: используем стандартную логику
+                is_table_change = "таблице" in description_lower
+        else:
+            # Если номера пункта нет, используем стандартную проверку
+            is_table_change = "таблице" in description_lower
         
         logger.info(f"🔍 ПРОВЕРКА ТАБЛИЦЫ: is_table_change={is_table_change}, description='{description[:50]}...'")
         
@@ -5129,14 +5192,42 @@ class DocumentChangeAgent:
                 
                 for row_idx, row in enumerate(table.rows):
                     # 1. НАХОДИМ СТРОКУ с target_text
+                    # Сначала проверяем, если есть номер пункта в инструкции - ищем строку с этим номером
                     target_found = False
                     target_cell_idx = -1
-                    for cell_idx, cell in enumerate(row.cells):
-                        if target_text in cell.text:
-                            target_found = True
-                            target_cell_idx = cell_idx
-                            logger.info(f"   ✅ Найдена строка {row_idx} с '{target_text}' в ячейке {cell_idx}")
-                            break
+                    
+                    # Если есть номер пункта, сначала проверяем, начинается ли первая ячейка строки с этого номера
+                    punkt_in_row = False
+                    if punkt_number and len(row.cells) > 0:
+                        first_cell_text = row.cells[0].text.strip()
+                        punkt_patterns = [f"{punkt_number}.", f"{punkt_number})", f"{punkt_number}."]
+                        for pattern in punkt_patterns:
+                            if first_cell_text.startswith(pattern) or first_cell_text == punkt_number:
+                                punkt_in_row = True
+                                logger.info(f"   📋 Найдена строка {row_idx} с номером пункта {punkt_number} в первой ячейке")
+                                # Если пункт найден в этой строке, ищем target_text в ячейках этой строки
+                                for cell_idx, cell in enumerate(row.cells):
+                                    if target_text in cell.text:
+                                        target_found = True
+                                        target_cell_idx = cell_idx
+                                        logger.info(f"   ✅ Найдена строка {row_idx} с пунктом {punkt_number} и '{target_text}' в ячейке {cell_idx}")
+                                        break
+                                break
+                    
+                    # Если пункт не найден в строке или пункт найден но target_text не найден, 
+                    # или номер пункта не указан - ищем target_text в любой ячейке строки
+                    if not target_found:
+                        for cell_idx, cell in enumerate(row.cells):
+                            if target_text in cell.text:
+                                # Если номер пункта указан, но мы его не нашли в первой ячейке, 
+                                # пропускаем эту строку (строго по инструкции)
+                                if punkt_number and not punkt_in_row:
+                                    logger.info(f"   ⏭️ Пропускаем строку {row_idx} (target_text найден, но номер пункта {punkt_number} не совпадает)")
+                                    continue
+                                target_found = True
+                                target_cell_idx = cell_idx
+                                logger.info(f"   ✅ Найдена строка {row_idx} с '{target_text}' в ячейке {cell_idx}")
+                                break
                     
                     if target_found:
                         # 2. АНАЛИЗИРУЕМ СТРУКТУРУ СТРОКИ
