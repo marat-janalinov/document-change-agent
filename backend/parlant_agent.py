@@ -3661,6 +3661,12 @@ class DocumentChangeAgent:
             results: List[Dict[str, Any]] = []
             total = len(changes)
             
+            # КРИТИЧЕСКОЕ: Создаем ОДИН объект Document() для всех изменений
+            # Все изменения будут применяться к этому объекту, и файл сохранится только один раз в конце
+            logger.info(f"📄 Создание единого объекта Document() для всех {total} изменений")
+            master_doc = Document(source_file)
+            logger.info(f"✅ Документ загружен: {len(master_doc.paragraphs)} параграфов, {len(master_doc.tables)} таблиц")
+            
             logger.info(f"🚀 Начало последовательного применения {total} изменений в ИСХОДНОМ порядке")
             logger.info("📋 ПОРЯДОК ВЫПОЛНЕНИЯ:")
             for idx, change in enumerate(changes, start=1):
@@ -3680,6 +3686,7 @@ class DocumentChangeAgent:
                         change,
                         progress_callback=progress_callback,
                         changes_file=changes_file,
+                        master_doc=master_doc,  # Передаем единый объект документа
                     )
                     results.append(execution_result)
                     
@@ -3848,6 +3855,7 @@ class DocumentChangeAgent:
         change: Dict[str, Any],
         progress_callback: OperationCallback = None,
         changes_file: Optional[str] = None,
+        master_doc: Optional[Document] = None,  # Единый объект документа для всех изменений
     ) -> Dict[str, Any]:
         """
         Выполнение одного изменения в документе.
@@ -4477,14 +4485,23 @@ class DocumentChangeAgent:
                     "message": f"Текст '{target_text}' не найден в документе. Попробуйте использовать более точный текст для поиска.",
                 }
 
+        # КРИТИЧЕСКОЕ: Используем master_doc, если он передан, иначе создаем новый
+        # Это позволяет работать с одним объектом документа для всех изменений
+        if master_doc is not None:
+            doc = master_doc
+            logger.info(f"📄 Используем единый объект документа (master_doc) для изменения")
+        else:
+            # Fallback для совместимости (если master_doc не передан)
+            doc = Document(filename)
+            logger.info(f"⚠️ master_doc не передан, создан новый объект Document() - файл будет сохранен отдельно")
+        
         # ПРОВЕРКА ОБЛАСТИ ПРИМЕНЕНИЯ: локальные vs глобальные изменения
         is_global_change = self._is_global_change(description)
         logger.info(f"📍 Область применения: {'ГЛОБАЛЬНАЯ' if is_global_change else 'ЛОКАЛЬНАЯ'}")
         
         # Для массовых замен или глобальных изменений
         if replace_all or is_global_change or (len(matches) > 1 and is_global_change):
-            # Обрабатываем все вхождения
-            doc = Document(filename)
+            # Используем doc (master_doc или новый)
             replaced_count = 0
             affected_paragraphs = set()
 
@@ -4513,7 +4530,11 @@ class DocumentChangeAgent:
                     "message": f"Не удалось заменить '{target_text}' в документе (проверены параграфы и таблицы)",
                 }
 
-            doc.save(filename)
+            # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+            # Файл будет сохранен один раз в конце после всех изменений
+            if master_doc is None:
+                doc.save(filename)
+                logger.info(f"💾 Файл сохранен после массовой замены (master_doc не использовался)")
 
             # Добавляем аннотацию к первому затронутому параграфу
             if change.get("annotation", True) and affected_paragraphs:
@@ -4590,12 +4611,18 @@ class DocumentChangeAgent:
         # Инициализируем переменную replaced
         replaced = False
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Сначала пробуем локальную замену (которая гарантированно сохраняет файл)
-        # Только если локальная не сработает, создадим Document() для работы с параграфом
-        logger.info(f"🔄 СНАЧАЛА пробуем локальную замену (которая гарантированно сохраняет файл)")
-        local_replaced_first = mcp_client._replace_text_locally_with_tables(
-            filename, target_text, new_text, paragraph_index
-        )
+        # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Если используется master_doc, работаем напрямую с ним
+        # НЕ используем локальную замену, которая сохраняет файл - файл будет сохранен в конце
+        if master_doc is not None:
+            logger.info(f"📄 Работа с единым объектом документа (master_doc) - замена напрямую в памяти")
+            # Не вызываем локальную замену, которая сохраняет файл
+            local_replaced_first = False
+        else:
+            # Fallback: если master_doc не передан, используем старую логику с локальной заменой
+            logger.info(f"🔄 Fallback: пробуем локальную замену (master_doc не передан)")
+            local_replaced_first = mcp_client._replace_text_locally_with_tables(
+                filename, target_text, new_text, paragraph_index
+            )
         
         if local_replaced_first:
             # Проверяем результат локальной замены
@@ -4622,10 +4649,15 @@ class DocumentChangeAgent:
             
             del verify_doc_local  # Освобождаем память
         
-        # ТОЛЬКО если локальная замена не сработала, создаем Document() для работы с параграфом
+        # Если master_doc используется, работаем с ним напрямую
+        # Если нет - создаем Document() только если локальная замена не сработала
         if not replaced:
-            logger.info(f"🔄 Локальная замена не сработала, создаем Document() для работы с параграфом")
-            doc = Document(filename)
+            if master_doc is not None:
+                logger.info(f"📄 Используем master_doc для работы с параграфом")
+                doc = master_doc
+            else:
+                logger.info(f"🔄 Локальная замена не сработала, создаем Document() для работы с параграфом")
+                doc = Document(filename)
             para = doc.paragraphs[paragraph_index]
         
         # Инициализируем переменные для специальной обработки заголовков (до их использования)
@@ -4705,29 +4737,44 @@ class DocumentChangeAgent:
                     if new_text in para.text:
                         logger.info(f"✅ Замена в заголовке выполнена успешно")
                         replaced = True
-                        # Сохраняем документ сразу после успешной замены
-                        doc.save(filename)
+                        # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                        # Файл будет сохранен один раз в конце после всех изменений
+                        if master_doc is None:
+                            doc.save(filename)
+                            logger.info(f"💾 Файл сохранен после замены в заголовке (master_doc не использовался)")
                         
                         # НОВЫЙ ФУНКЦИОНАЛ: Синхронизация с содержанием (оглавлением)
-                        await self._sync_heading_with_table_of_contents(filename, target_text, new_text, is_heading_change=True)
-                        # Перезагружаем документ для финальной проверки
-                        try:
-                            verify_doc = Document(filename)
-                            if paragraph_index < len(verify_doc.paragraphs):
-                                verify_para = verify_doc.paragraphs[paragraph_index]
+                        # Передаем master_doc для синхронизации, чтобы не создавать новый Document()
+                        await self._sync_heading_with_table_of_contents(
+                            filename, target_text, new_text, is_heading_change=True, master_doc=master_doc
+                        )
+                        
+                        # Проверяем результат в master_doc (если используется) или в файле (если нет)
+                        if master_doc is not None:
+                            # Проверяем напрямую в master_doc
+                            if paragraph_index < len(master_doc.paragraphs):
+                                verify_para = master_doc.paragraphs[paragraph_index]
                                 if new_text in verify_para.text:
-                                    logger.info(f"✅ Замена в заголовке подтверждена после сохранения")
-                                else:
-                                    logger.warning(f"⚠️ Замена в заголовке не обнаружена после сохранения, пробуем еще раз")
-                                    # Пробуем еще раз прямую замену
-                                    if target_text in verify_para.text:
-                                        verify_para.text = verify_para.text.replace(target_text, new_text, 1)
-                                        if verify_para.style:
-                                            verify_para.style = heading_style
-                                        verify_doc.save(filename)
-                                        logger.info(f"✅ Повторная замена в заголовке выполнена")
-                        except Exception as verify_e:
-                            logger.warning(f"⚠️ Не удалось проверить замену в заголовке после сохранения: {verify_e}")
+                                    logger.info(f"✅ Замена в заголовке подтверждена в master_doc")
+                        elif master_doc is None:
+                            # Fallback: проверяем в файле
+                            try:
+                                verify_doc = Document(filename)
+                                if paragraph_index < len(verify_doc.paragraphs):
+                                    verify_para = verify_doc.paragraphs[paragraph_index]
+                                    if new_text in verify_para.text:
+                                        logger.info(f"✅ Замена в заголовке подтверждена после сохранения")
+                                    else:
+                                        logger.warning(f"⚠️ Замена в заголовке не обнаружена после сохранения, пробуем еще раз")
+                                        # Пробуем еще раз прямую замену
+                                        if target_text in verify_para.text:
+                                            verify_para.text = verify_para.text.replace(target_text, new_text, 1)
+                                            if verify_para.style:
+                                                verify_para.style = heading_style
+                                            verify_doc.save(filename)
+                                            logger.info(f"✅ Повторная замена в заголовке выполнена")
+                            except Exception as verify_e:
+                                logger.warning(f"⚠️ Не удалось проверить замену в заголовке после сохранения: {verify_e}")
                     else:
                         logger.warning(f"⚠️ Замена в заголовке не подтверждена")
                 else:
@@ -5036,65 +5083,48 @@ class DocumentChangeAgent:
                 "message": f"Не удалось заменить '{target_text}' в найденном параграфе. Испробованы все методы замены.",
             }
 
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ВСЕГДА убеждаемся, что файл сохранен
-        # Даже если локальная замена вернула True, она могла не сохранить файл
-        # Поэтому проверяем и сохраняем в любом случае
-        if doc is not None:
+        # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+        # Файл будет сохранен один раз в конце после всех изменений в process_documents
+        # Сохраняем только если master_doc не используется (fallback режим)
+        if doc is not None and master_doc is None:
             doc.save(filename)
-            logger.info(f"💾 Документ сохранен после замены через Document() (локальная замена не сработала)")
-        elif replaced:
-            # Если локальная замена сработала (replaced = True), но мы не создали doc,
-            # нужно убедиться, что файл действительно сохранен
-            # Переоткрываем файл и проверяем, что изменения там есть
-            try:
-                verify_final_doc = Document(filename)
-                verify_success = False
-                
-                if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(verify_final_doc.paragraphs):
-                    verify_para_text = verify_final_doc.paragraphs[paragraph_index].text
-                    if new_text in verify_para_text or target_text not in verify_para_text:
-                        verify_success = True
-                else:
-                    all_text = "\n".join([p.text for p in verify_final_doc.paragraphs])
-                    if new_text in all_text or target_text not in all_text:
-                        verify_success = True
-                
-                if not verify_success:
-                    # Локальная замена вернула True, но файл не содержит изменений!
-                    # Это критическая ошибка - локальная замена не сохранила файл
-                    logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Локальная замена вернула True, но файл не содержит изменений!")
-                    logger.error(f"❌ Пробуем сохранить через новый Document()...")
-                    # Создаем новый Document и пробуем заменить еще раз
-                    final_doc = Document(filename)
-                    if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(final_doc.paragraphs):
-                        final_para = final_doc.paragraphs[paragraph_index]
-                        if target_text in final_para.text:
-                            final_para.text = final_para.text.replace(target_text, new_text, 1)
-                            final_doc.save(filename)
-                            logger.info(f"✅ Исправлено: файл сохранен с изменениями")
-                        else:
-                            logger.error(f"❌ Текст '{target_text}' не найден в параграфе {paragraph_index} для повторной замены")
-            except Exception as verify_final_e:
-                logger.error(f"❌ Ошибка при финальной проверке сохранения: {verify_final_e}", exc_info=True)
+            logger.info(f"💾 Документ сохранен после замены через Document() (fallback режим, master_doc не использовался)")
+        elif replaced and master_doc is None:
+            # Если локальная замена сработала (replaced = True) в fallback режиме,
+            # файл уже сохранен локальной заменой - ничего не делаем
+            logger.info(f"💾 Файл уже сохранен локальной заменой (fallback режим)")
         
-        # НОВЫЙ ФУНКЦИОНАЛ: Финальная проверка после сохранения
-        try:
-            # Переоткрываем документ и проверяем, что замена действительно произошла
-            verify_doc = Document(filename)
-            if paragraph_index < len(verify_doc.paragraphs):
-                verify_para_text = verify_doc.paragraphs[paragraph_index].text
-                if new_text not in verify_para_text and target_text in verify_para_text:
-                    logger.warning(f"⚠️ Замена не обнаружена после сохранения, пробуем еще раз...")
-                    # Пробуем еще раз прямую замену
-                    verify_para = verify_doc.paragraphs[paragraph_index]
-                    if target_text in verify_para.text:
-                        verify_para.text = verify_para.text.replace(target_text, new_text, 1)
-                        verify_doc.save(filename)
-                        logger.info(f"✅ Повторная замена выполнена успешно")
-                elif new_text in verify_para_text:
-                    logger.info(f"✅ Замена подтверждена после сохранения")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось проверить замену после сохранения: {e}")
+        # Финальная проверка результата (только если master_doc не используется)
+        # Если используется master_doc, проверяем напрямую в нем
+        if master_doc is not None:
+            # Проверяем напрямую в master_doc
+            try:
+                if paragraph_index < len(master_doc.paragraphs):
+                    verify_para_text = master_doc.paragraphs[paragraph_index].text
+                    if new_text in verify_para_text or target_text not in verify_para_text:
+                        logger.info(f"✅ Замена подтверждена в master_doc")
+                    else:
+                        logger.warning(f"⚠️ Замена не обнаружена в master_doc после всех попыток")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось проверить замену в master_doc: {e}")
+        elif master_doc is None:
+            # Fallback: проверяем в файле
+            try:
+                verify_doc = Document(filename)
+                if paragraph_index < len(verify_doc.paragraphs):
+                    verify_para_text = verify_doc.paragraphs[paragraph_index].text
+                    if new_text not in verify_para_text and target_text in verify_para_text:
+                        logger.warning(f"⚠️ Замена не обнаружена после сохранения, пробуем еще раз...")
+                        # Пробуем еще раз прямую замену
+                        verify_para = verify_doc.paragraphs[paragraph_index]
+                        if target_text in verify_para.text:
+                            verify_para.text = verify_para.text.replace(target_text, new_text, 1)
+                            verify_doc.save(filename)
+                            logger.info(f"✅ Повторная замена выполнена успешно")
+                    elif new_text in verify_para_text:
+                        logger.info(f"✅ Замена подтверждена после сохранения")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось проверить замену после сохранения: {e}")
 
         if change.get("annotation", True):
             await self._add_annotation(
@@ -9576,7 +9606,8 @@ class DocumentChangeAgent:
         filename: str,
         old_heading_text: str,
         new_heading_text: str,
-        is_heading_change: bool = True
+        is_heading_change: bool = True,
+        master_doc: Optional[Document] = None  # Единый объект документа для всех изменений
     ) -> None:
         """
         НОВЫЙ ФУНКЦИОНАЛ: Синхронизация изменений между заголовками разделов и содержанием (оглавлением).
@@ -9593,7 +9624,12 @@ class DocumentChangeAgent:
         try:
             logger.info(f"🔄 Синхронизация заголовка с содержанием: '{old_heading_text}' → '{new_heading_text}'")
             
-            doc = Document(filename)
+            # Используем master_doc, если передан, иначе создаем новый
+            if master_doc is not None:
+                doc = master_doc
+                logger.info(f"📄 Используем master_doc для синхронизации")
+            else:
+                doc = Document(filename)
             synced_count = 0
             
             # Ищем текст в таблицах (содержание обычно хранится в таблицах)
