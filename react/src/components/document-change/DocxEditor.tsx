@@ -389,7 +389,21 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
     e.stopPropagation();
     if (searchDialogRef.current) {
       const rect = searchDialogRef.current.getBoundingClientRect();
-      const currentSize = searchDialogSize || { width: rect.width, height: rect.height };
+      
+      // Устанавливаем начальную позицию, если её ещё нет (чтобы можно было изменять размер сразу)
+      if (!searchDialogPosition) {
+        setSearchDialogPosition({
+          x: rect.left,
+          y: rect.top,
+        });
+      }
+      
+      // Устанавливаем начальный размер, если его ещё нет
+      const currentSize = searchDialogSize || { width: rect.width || 500, height: rect.height || 400 };
+      if (!searchDialogSize) {
+        setSearchDialogSize(currentSize);
+      }
+      
       setIsResizingSearch(true);
       setResizeStart({
         x: e.clientX,
@@ -438,26 +452,32 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
   }, [isDraggingSearch, isResizingSearch, dragStart, resizeStart]);
 
 
-  // Сброс позиции и размера при закрытии диалога
+  // Инициализация позиции и размера при открытии диалога
   useEffect(() => {
-    if (!isSearchOpen) {
-      setSearchDialogPosition(null);
-      setSearchDialogSize(null);
-    } else if (!searchDialogPosition && searchDialogRef.current) {
-      // При первом открытии центрируем диалог
+    if (isSearchOpen && searchDialogRef.current) {
+      // При открытии инициализируем позицию и размер, если они еще не установлены
       const rect = searchDialogRef.current.getBoundingClientRect();
-      setSearchDialogPosition({
-        x: window.innerWidth / 2 - rect.width / 2,
-        y: window.innerHeight / 2 - rect.height / 2,
-      });
-      if (!searchDialogSize) {
-        setSearchDialogSize({
-          width: rect.width,
-          height: rect.height,
+      
+      if (!searchDialogPosition) {
+        setSearchDialogPosition({
+          x: window.innerWidth / 2 - rect.width / 2,
+          y: window.innerHeight / 2 - rect.height / 2,
         });
       }
+      
+      if (!searchDialogSize) {
+        setSearchDialogSize({
+          width: rect.width || 500,
+          height: rect.height || 400,
+        });
+      }
+    } else if (!isSearchOpen) {
+      // При закрытии сбрасываем только позицию, но сохраняем размер
+      setSearchDialogPosition(null);
+      // Не сбрасываем размер, чтобы при следующем открытии сохранить пользовательские настройки
+      // setSearchDialogSize(null);
     }
-  }, [isSearchOpen, searchDialogPosition, searchDialogSize]);
+  }, [isSearchOpen]);
 
   // Выполнение поиска по нажатию кнопки "Найти"
   const handleSearch = () => {
@@ -873,15 +893,19 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
               <DialogContent
                 ref={searchDialogRef}
                 style={
-                  searchDialogPosition
+                  isSearchOpen
                     ? {
                         position: 'fixed',
-                        left: `${Math.max(0, Math.min(searchDialogPosition.x, window.innerWidth - (searchDialogSize?.width || 400)))}px`,
-                        top: `${Math.max(0, Math.min(searchDialogPosition.y, window.innerHeight - (searchDialogSize?.height || 300)))}px`,
-                        width: searchDialogSize ? `${searchDialogSize.width}px` : undefined,
-                        height: searchDialogSize ? `${searchDialogSize.height}px` : undefined,
-                        transform: 'none',
+                        left: searchDialogPosition 
+                          ? `${Math.max(0, Math.min(searchDialogPosition.x, window.innerWidth - (searchDialogSize?.width || 400)))}px`
+                          : '50%',
+                        top: searchDialogPosition
+                          ? `${Math.max(0, Math.min(searchDialogPosition.y, window.innerHeight - (searchDialogSize?.height || 300)))}px`
+                          : '50%',
+                        transform: searchDialogPosition ? 'none' : 'translate(-50%, -50%)',
                         margin: 0,
+                        width: searchDialogSize ? `${searchDialogSize.width}px` : '500px',
+                        height: searchDialogSize ? `${searchDialogSize.height}px` : '400px',
                         maxWidth: '100vw',
                         maxHeight: '100vh',
                         resize: 'none',
@@ -889,16 +913,16 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                       }
                     : undefined
                 }
-                className={searchDialogPosition ? 'cursor-default relative' : ''}
+                className={isSearchOpen ? 'cursor-default relative' : ''}
               >
                 <DialogHeader
                   onMouseDown={handleSearchDialogMouseDown}
-                  className={searchDialogPosition ? 'cursor-move select-none' : 'cursor-default'}
+                  className={isSearchOpen ? 'cursor-move select-none' : 'cursor-default'}
                 >
                   <DialogTitle>Поиск в документе</DialogTitle>
                 </DialogHeader>
-                {/* Handle для изменения размера */}
-                {searchDialogPosition && (
+                {/* Handle для изменения размера - всегда показываем когда диалог открыт */}
+                {isSearchOpen && (
                   <div
                     onMouseDown={handleSearchDialogResizeStart}
                     className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize bg-border hover:bg-primary/20 transition-colors z-10"
