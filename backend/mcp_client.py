@@ -212,16 +212,35 @@ class MCPClient:
         try:
             result = await self._call_tool("search_and_replace", arguments)
             
-            # Если стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц
+            # НОВОЕ: Проверяем, действительно ли MCP сообщил об успехе
             if not self._message_is_successful(result.text):
-                logger.info(f"Стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц")
+                logger.info(f"Стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц. Ответ MCP: {result.text}")
                 return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
             
-            # Верификация: проверяем, действительно ли замена произошла
-            try:
-                from docx import Document
-                verify_doc = Document(filename)
-                doc_text = "\n".join([p.text for p in verify_doc.paragraphs])
+            return True
+        except RuntimeError as e:
+            # Если MCP не поддерживает paragraph_index, пробуем без него
+            if "paragraph_index" in str(e) and "Unexpected keyword argument" in str(e):
+                logger.info(f"MCP не поддерживает paragraph_index, пробуем без него")
+                try:
+                    arguments_without_para = {k: v for k, v in arguments.items() if k != "paragraph_index"}
+                    result = await self._call_tool("search_and_replace", arguments_without_para)
+                    if self._message_is_successful(result.text):
+                        return True
+                    else:
+                        logger.info(f"MCP замена без paragraph_index не сработала, пробуем локальную замену")
+                        return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
+                except Exception as e2:
+                    logger.warning(f"Ошибка при замене без paragraph_index: {e2}, пробуем локальную замену")
+                    return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
+            else:
+                # Другие ошибки RuntimeError - пробуем локальную замену
+                logger.warning(f"Ошибка MCP replace_text: {e}, пробуем локальную замену")
+                return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при MCP replace_text: {e}", exc_info=True)
+            # В случае любой другой ошибки пробуем локальную замену
+            return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
                 
                 # Если старый текст все еще присутствует, а новый отсутствует, значит замена не произошла
                 old_found = old_text in doc_text
@@ -241,7 +260,7 @@ class MCPClient:
                 logger.debug(f"Не удалось проверить результат замены: {verify_e}")
                 # Если не удалось проверить, считаем успешным (на случай проблем с доступом к файлу)
             
-            return True
+        return True
         except RuntimeError as e:
             # Если ошибка связана с неожиданным аргументом paragraph_index,
             # пробуем вызвать без него (для совместимости со старыми версиями MCP сервера)
