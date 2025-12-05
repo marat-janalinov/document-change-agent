@@ -4737,9 +4737,36 @@ class DocumentChangeAgent:
                         try:
                             verify_doc = Document(filename)
                             all_text = "\n".join([p.text for p in verify_doc.paragraphs])
-                            if new_text in all_text:
+                            old_found = target_text in all_text
+                            new_found = new_text in all_text
+                            
+                            if new_found or not old_found:
                                 replaced = True
                                 logger.info(f"✅ Замена подтверждена после MCP replace_text (глобально)")
+                            else:
+                                logger.warning(f"⚠️ MCP вернул успех (глобально), но замена не обнаружена (старый текст найден, новый отсутствует), пробуем локальную замену")
+                                # Пробуем локальную замену
+                                try:
+                                    local_doc = Document(filename)
+                                    local_replaced = False
+                                    for para in local_doc.paragraphs:
+                                        if target_text in para.text:
+                                            para_text = para.text
+                                            new_para_text = para_text.replace(target_text, new_text, 1)
+                                            if new_para_text != para_text:
+                                                para.clear()
+                                                para.add_run(new_para_text)
+                                                local_replaced = True
+                                                break
+                                    
+                                    if local_replaced:
+                                        local_doc.save(filename)
+                                        replaced = True
+                                        logger.info(f"✅ Локальная замена выполнена успешно после неудачной верификации MCP (глобально)")
+                                    else:
+                                        logger.warning(f"⚠️ Локальная замена также не удалась (глобально)")
+                                except Exception as local_e:
+                                    logger.error(f"❌ Ошибка при локальной замене (глобально): {local_e}")
                         except Exception as verify_e:
                             logger.warning(f"⚠️ Не удалось проверить результат: {verify_e}")
                             replaced = True
