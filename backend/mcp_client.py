@@ -672,9 +672,16 @@ class MCPClient:
                     if paragraph_index is not None and paragraph_index >= 0:
                         break
             
-            # Замена в таблицах ТОЛЬКО если не указан конкретный параграф
-            # (если указан paragraph_index, изменения строго по инструкции - только в указанном месте)
-            if replacements_made == 0 and paragraph_index is None:
+            # Замена в таблицах:
+            # 1. Если paragraph_index == -1 (изменение в таблице) - проверяем таблицы
+            # 2. Если paragraph_index is None (глобальная замена) - проверяем таблицы, если не найдено в параграфах
+            # 3. Если paragraph_index >= 0 (конкретный параграф) - НЕ проверяем таблицы (строго по инструкции)
+            should_check_tables = (
+                paragraph_index == -1 or  # Явно указана таблица
+                (paragraph_index is None and replacements_made == 0)  # Глобальная замена, не найдено в параграфах
+            )
+            
+            if should_check_tables:
                 for table_idx, table in enumerate(doc.tables):
                     for row_idx, row in enumerate(table.rows):
                         for cell_idx, cell in enumerate(row.cells):
