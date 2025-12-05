@@ -839,18 +839,20 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                   searchDialogPosition
                     ? {
                         position: 'fixed',
-                        left: `${searchDialogPosition.x}px`,
-                        top: `${searchDialogPosition.y}px`,
+                        left: `${Math.max(0, Math.min(searchDialogPosition.x, window.innerWidth - 400))}px`,
+                        top: `${Math.max(0, Math.min(searchDialogPosition.y, window.innerHeight - 300))}px`,
                         transform: 'none',
                         margin: 0,
+                        maxWidth: '100vw',
+                        maxHeight: '100vh',
                       }
                     : undefined
                 }
-                className={searchDialogPosition ? 'cursor-move' : ''}
+                className={searchDialogPosition ? 'cursor-default' : ''}
               >
                 <DialogHeader
                   onMouseDown={handleSearchDialogMouseDown}
-                  className="cursor-move select-none"
+                  className={searchDialogPosition ? 'cursor-move select-none' : 'cursor-default'}
                 >
                   <DialogTitle>Поиск в документе</DialogTitle>
                 </DialogHeader>
