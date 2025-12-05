@@ -345,9 +345,20 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
     }
   };
 
-  const handleSearch = (query: string) => {
+  // Обработка изменения текста в поле поиска (без выполнения поиска)
+  const handleSearchInputChange = (query: string) => {
     setSearchQuery(query);
-    highlightSearchResults(query);
+    // НЕ выполняем поиск при вводе - только обновляем значение поля
+  };
+
+  // Выполнение поиска по нажатию кнопки "Найти"
+  const handleSearch = () => {
+    if (!searchQuery.trim()) {
+      // Если поле пустое, очищаем результаты поиска
+      highlightSearchResults('');
+      return;
+    }
+    highlightSearchResults(searchQuery);
   };
 
   const handleNextResult = () => {
@@ -756,40 +767,57 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                   <DialogTitle>Поиск в документе</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4">
-                  <div>
+                  <div className="flex gap-2">
                     <Input
                       placeholder="Введите текст для поиска..."
                       value={searchQuery}
-                      onChange={(e) => handleSearch(e.target.value)}
+                      onChange={(e) => handleSearchInputChange(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && e.shiftKey) {
+                        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+                          e.preventDefault();
+                          handleSearch();
+                        } else if (e.key === 'Enter' && e.shiftKey) {
+                          e.preventDefault();
                           handlePrevResult();
-                        } else if (e.key === 'Enter') {
-                          handleNextResult();
                         }
                       }}
+                      className="flex-1"
                     />
+                    <Button
+                      onClick={handleSearch}
+                      disabled={!searchQuery.trim()}
+                      variant="default"
+                    >
+                      Найти
+                    </Button>
                   </div>
                   {searchResults.length > 0 && (
                     <div className="flex items-center justify-between text-sm text-muted-foreground">
                       <span>Найдено: {searchResults.length}</span>
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 items-center">
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={handlePrevResult}
+                          disabled={searchResults.length === 0}
                         >
                           ← Предыдущее
                         </Button>
-                        <span>{currentSearchIndex + 1} / {searchResults.length}</span>
+                        <span className="min-w-[60px] text-center">{currentSearchIndex + 1} / {searchResults.length}</span>
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={handleNextResult}
+                          disabled={searchResults.length === 0}
                         >
                           Следующее →
                         </Button>
                       </div>
+                    </div>
+                  )}
+                  {searchQuery.trim() && searchResults.length === 0 && (
+                    <div className="text-sm text-muted-foreground">
+                      Ничего не найдено
                     </div>
                   )}
                 </div>
@@ -814,11 +842,28 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                 <div className="space-y-4">
                   <div>
                     <label className="text-sm font-medium mb-2 block">Найти:</label>
-                    <Input
-                      placeholder="Введите текст для поиска..."
-                      value={searchQuery}
-                      onChange={(e) => handleSearch(e.target.value)}
-                    />
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="Введите текст для поиска..."
+                        value={searchQuery}
+                        onChange={(e) => handleSearchInputChange(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+                            e.preventDefault();
+                            handleSearch();
+                          }
+                        }}
+                        className="flex-1"
+                      />
+                      <Button
+                        onClick={handleSearch}
+                        disabled={!searchQuery.trim()}
+                        variant="default"
+                        size="sm"
+                      >
+                        Найти
+                      </Button>
+                    </div>
                   </div>
                   <div>
                     <label className="text-sm font-medium mb-2 block">Заменить на:</label>
