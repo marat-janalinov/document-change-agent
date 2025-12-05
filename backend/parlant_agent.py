@@ -1845,36 +1845,48 @@ class DocumentChangeAgent:
         if "changes" not in parsed_json:
             # НОВЫЙ ФУНКЦИОНАЛ: Попытка восстановления структуры
             logger.warning("⚠️ JSON не содержит массив 'changes', пытаемся восстановить структуру...")
-            # Ищем изменения в других ключах
-            possible_keys = ["change", "modifications", "instructions", "updates", "edits", "items"]
-            found = False
-            for key in possible_keys:
-                if key in parsed_json and isinstance(parsed_json[key], list):
-                    parsed_json["changes"] = parsed_json[key]
-                    logger.info(f"✅ Восстановлено: найден массив изменений в ключе '{key}'")
-                    found = True
-                    break
             
-            # Если не нашли в других ключах, проверяем верхний уровень
-            if not found:
-                # Проверяем, может быть все ключи верхнего уровня - это изменения
-                all_items = []
-                for key, value in parsed_json.items():
-                    if isinstance(value, dict) and ("operation" in value or "description" in value):
-                        all_items.append(value)
-                    elif isinstance(value, list):
-                        # Может быть вложенный массив
-                        for item in value:
-                            if isinstance(item, dict) and ("operation" in item or "description" in item):
-                                all_items.append(item)
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если сам словарь является объектом изменения
+            # (имеет change_id, operation, description), оборачиваем в массив
+            if "change_id" in parsed_json or ("operation" in parsed_json and "description" in parsed_json):
+                logger.info("✅ Восстановлено: найден один объект изменения, оборачиваем в массив 'changes'")
+                parsed_json = {"changes": [parsed_json]}
+            else:
+                # Ищем изменения в других ключах
+                possible_keys = ["change", "modifications", "instructions", "updates", "edits", "items"]
+                found = False
+                for key in possible_keys:
+                    if key in parsed_json and isinstance(parsed_json[key], list):
+                        parsed_json["changes"] = parsed_json[key]
+                        logger.info(f"✅ Восстановлено: найден массив изменений в ключе '{key}'")
+                        found = True
+                        break
                 
-                if all_items:
-                    parsed_json["changes"] = all_items
-                    logger.info(f"✅ Восстановлено: найдено {len(all_items)} объектов изменений на верхнем уровне")
-                else:
-                    # Последняя попытка - создаем пустой массив
-                    logger.warning("⚠️ Не удалось найти изменения, создаем пустой массив")
-                    parsed_json["changes"] = []
+                # Если не нашли в других ключах, проверяем верхний уровень
+                if not found:
+                    # Проверяем, может быть все ключи верхнего уровня - это изменения
+                    all_items = []
+                    for key, value in parsed_json.items():
+                        if isinstance(value, dict) and ("operation" in value or "description" in value):
+                            all_items.append(value)
+                        elif isinstance(value, list):
+                            # Может быть вложенный массив
+                            for item in value:
+                                if isinstance(item, dict) and ("operation" in item or "description" in item):
+                                    all_items.append(item)
+                    
+                    if all_items:
+                        parsed_json["changes"] = all_items
+                        logger.info(f"✅ Восстановлено: найдено {len(all_items)} объектов изменений на верхнем уровне")
+                    else:
+                        # Последняя попытка - создаем пустой массив
+                        logger.warning("⚠️ Не удалось найти изменения, создаем пустой массив")
+                        parsed_json["changes"] = []
+        
+        # После восстановления структуры проверяем, что changes существует
+        if "changes" not in parsed_json:
+            logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: После восстановления структуры массив 'changes' все еще отсутствует")
+            parsed_json["changes"] = []
         
         changes = parsed_json["changes"]
         if not isinstance(changes, list):
@@ -1933,6 +1945,12 @@ class DocumentChangeAgent:
             # Проверяем наличие ключа changes
             if "changes" in parsed:
                 return parsed
+            
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если сам словарь является объектом изменения
+            # (имеет change_id, operation, description), оборачиваем в массив
+            if "change_id" in parsed or ("operation" in parsed and "description" in parsed):
+                logger.info("   ✅ Найден один объект изменения, оборачиваем в массив 'changes'")
+                return {"changes": [parsed]}
             
             # Ищем изменения в других ключах
             possible_keys = ["change", "modifications", "instructions", "updates", "edits", "items"]
