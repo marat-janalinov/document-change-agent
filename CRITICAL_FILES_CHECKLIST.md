@@ -57,19 +57,40 @@ docker compose exec mcp-server cat word_document_server/tools/content_tools.py |
 - Принимает ли функция `paragraph_index` как параметр?
 - Совпадают ли сигнатуры функций?
 
-### Проверка 2: Промпты
+### Проверка 2: Промпты (КРИТИЧНО!)
 
 ```bash
-# На локальной машине
+# На локальной машине - сравните версии в репозитории и runtime
+echo "=== Промпты в репозитории (backend/prompts/) ==="
+ls -lh backend/prompts/*.md
+md5sum backend/prompts/*.md
+
+echo "=== Промпты в runtime (data/prompts/) ==="
+ls -lh data/prompts/*.md
 md5sum data/prompts/*.md
 
-# На сервере
-docker compose exec backend md5sum /data/prompts/*.md
+# На сервере (в контейнере)
+docker compose exec backend bash -c "
+echo '=== Промпты в репозитории (backend/prompts/) ==='
+ls -lh /app/prompts/*.md 2>/dev/null || echo 'Нет /app/prompts/'
+md5sum /app/prompts/*.md 2>/dev/null || echo 'Нет /app/prompts/'
+
+echo '=== Промпты в runtime (/data/prompts/) ==='
+ls -lh /data/prompts/*.md
+md5sum /data/prompts/*.md
+"
 ```
 
 **Проверьте:**
-- Совпадают ли хеши файлов промптов?
-- Есть ли дополнительные файлы промптов на сервере?
+- Совпадают ли хеши файлов промптов между `backend/prompts/` и `data/prompts/`?
+- Совпадают ли размеры файлов? (разный размер = разные версии)
+- Есть ли различия в датах изменения?
+- **Если хеши не совпадают** - это критичная проблема! Нужно синхронизировать промпты.
+
+**Типичные проблемы:**
+- `instruction_check_system.md`: 3KB (старая) vs 11KB (новая)
+- `instruction_check_user.md`: 10KB (старая) vs 7KB (новая)
+- Разные версии промптов приводят к разному поведению LLM!
 
 ### Проверка 3: Переменные окружения
 
