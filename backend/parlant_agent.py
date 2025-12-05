@@ -4651,22 +4651,75 @@ class DocumentChangeAgent:
                     # Перезагружаем документ и проверяем результат
                     try:
                         verify_doc = Document(filename)
-                        if paragraph_index < len(verify_doc.paragraphs):
+                        verify_success = False
+                        
+                        if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(verify_doc.paragraphs):
                             verify_para_text = verify_doc.paragraphs[paragraph_index].text
+                            # Проверяем: новый текст присутствует ИЛИ старый текст отсутствует
                             if new_text in verify_para_text or target_text not in verify_para_text:
                                 replaced = True
-                                logger.info(f"✅ Замена подтверждена после MCP replace_text")
+                                verify_success = True
+                                logger.info(f"✅ Замена подтверждена после MCP replace_text в параграфе {paragraph_index}")
                             else:
-                                logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена")
+                                logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена в параграфе {paragraph_index}")
+                                logger.info(f"   Параграф {paragraph_index}: старый текст найден={target_text[:50] in verify_para_text}, новый текст найден={new_text[:50] in verify_para_text}")
                         else:
                             # Проверяем по всему документу
                             all_text = "\n".join([p.text for p in verify_doc.paragraphs])
-                            if new_text in all_text:
+                            old_found = target_text in all_text
+                            new_found = new_text in all_text
+                            
+                            if new_found or not old_found:
                                 replaced = True
+                                verify_success = True
                                 logger.info(f"✅ Замена подтверждена после MCP replace_text (по всему документу)")
+                            else:
+                                logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена (старый текст найден, новый отсутствует)")
+                        
+                        # Если верификация не прошла, пробуем локальную замену
+                        if not verify_success:
+                            logger.info(f"🔄 MCP вернул успех, но верификация не прошла, пробуем локальную замену")
+                            # Используем локальную замену как fallback
+                            try:
+                                local_doc = Document(filename)
+                                local_replaced = False
+                                
+                                # Пробуем заменить в указанном параграфе
+                                if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(local_doc.paragraphs):
+                                    para = local_doc.paragraphs[paragraph_index]
+                                    if target_text in para.text:
+                                        # Используем улучшенную локальную замену
+                                        para_text = para.text
+                                        new_para_text = para_text.replace(target_text, new_text, 1)
+                                        if new_para_text != para_text:
+                                            para.clear()
+                                            para.add_run(new_para_text)
+                                            local_replaced = True
+                                
+                                # Если не получилось в указанном параграфе, пробуем по всему документу
+                                if not local_replaced:
+                                    for para in local_doc.paragraphs:
+                                        if target_text in para.text:
+                                            para_text = para.text
+                                            new_para_text = para_text.replace(target_text, new_text, 1)
+                                            if new_para_text != para_text:
+                                                para.clear()
+                                                para.add_run(new_para_text)
+                                                local_replaced = True
+                                                break
+                                
+                                if local_replaced:
+                                    local_doc.save(filename)
+                                    replaced = True
+                                    logger.info(f"✅ Локальная замена выполнена успешно после неудачной верификации MCP")
+                                else:
+                                    logger.warning(f"⚠️ Локальная замена также не удалась")
+                            except Exception as local_e:
+                                logger.error(f"❌ Ошибка при локальной замене после верификации: {local_e}")
+                                
                     except Exception as verify_e:
                         logger.warning(f"⚠️ Не удалось проверить результат MCP replace_text: {verify_e}")
-                        # Все равно считаем успешным, если MCP вернул True
+                        # Если не удалось проверить, считаем успешным (на случай проблем с доступом к файлу)
                         replaced = True
                 else:
                     logger.warning(f"⚠️ MCP replace_text не удалась с paragraph_index={paragraph_index}, пробуем без указания параграфа")
