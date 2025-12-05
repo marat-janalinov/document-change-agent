@@ -4656,9 +4656,26 @@ class DocumentChangeAgent:
         
         if local_replaced_first:
             # Проверяем результат локальной замены
-            # КРИТИЧЕСКОЕ: Если используется master_doc, локальная замена не вызывается
+            # КРИТИЧЕСКОЕ: Если используется master_doc, проверяем напрямую в master_doc
             # Если же вызвана (fallback режим), проверяем файл с диска
-            if master_doc is None:
+            if master_doc is not None:
+                # Проверяем результат в master_doc напрямую
+                if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(master_doc.paragraphs):
+                    verify_para_text = master_doc.paragraphs[paragraph_index].text
+                    if new_text in verify_para_text or target_text not in verify_para_text:
+                        replaced = True
+                        logger.info(f"✅ Локальная замена в памяти выполнена успешно и подтверждена в параграфе {paragraph_index}")
+                    else:
+                        logger.warning(f"⚠️ Локальная замена в памяти вернула успех, но текст не найден в параграфе {paragraph_index}")
+                else:
+                    # Проверяем по всему документу
+                    all_text = "\n".join([p.text for p in master_doc.paragraphs])
+                    if new_text in all_text or target_text not in all_text:
+                        replaced = True
+                        logger.info(f"✅ Локальная замена в памяти выполнена успешно и подтверждена (по всему документу)")
+                    else:
+                        logger.warning(f"⚠️ Локальная замена в памяти вернула успех, но текст не найден в документе")
+            elif master_doc is None:
                 verify_doc_local = Document(filename)
                 verify_success_local = False
                 
