@@ -4329,7 +4329,7 @@ class DocumentChangeAgent:
         
         return original_details
 
-    async def _handle_replace_text(self, filename: str, change: Dict[str, Any], changes_file: Optional[str] = None) -> Dict[str, Any]:
+    async def _handle_replace_text(self, filename: str, change: Dict[str, Any], changes_file: Optional[str] = None, master_doc: Optional[Document] = None) -> Dict[str, Any]:
         """
         Обработка замены текста с поддержкой массовых замен и интеллектуальным анализом таблиц.
         """
