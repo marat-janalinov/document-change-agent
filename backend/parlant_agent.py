@@ -4560,22 +4560,74 @@ class DocumentChangeAgent:
                 }
 
         paragraph_index = matches[0].paragraph_index
-        doc = Document(filename)
-
-        if paragraph_index >= len(doc.paragraphs):
-            return {
-                "success": False,
-                "error": "PARAGRAPH_INDEX_OUT_OF_RANGE",
-                "message": f"Неверный индекс параграфа: {paragraph_index}",
-            }
-
-        para = doc.paragraphs[paragraph_index]
+        
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: НЕ создаем Document() здесь!
+        # Это прочитает файл с диска и может перезаписать изменения от предыдущих операций
+        # Вместо этого сначала пробуем локальную замену (которая создаст свой Document() и сохранит)
+        
+        # Проверяем валидность paragraph_index через быстрое чтение файла
+        try:
+            check_doc = Document(filename)
+            if paragraph_index >= len(check_doc.paragraphs):
+                return {
+                    "success": False,
+                    "error": "PARAGRAPH_INDEX_OUT_OF_RANGE",
+                    "message": f"Неверный индекс параграфа: {paragraph_index}",
+                }
+            # Получаем текст параграфа для проверки
+            para_text_check = check_doc.paragraphs[paragraph_index].text
+            del check_doc  # Освобождаем память
+        except Exception as check_e:
+            logger.warning(f"⚠️ Не удалось проверить paragraph_index: {check_e}")
+        
+        # Для работы с параграфом создадим doc только если локальная замена не сработает
+        doc = None
+        para = None
         
         # Инициализируем переменную replaced
         replaced = False
         
-        # НОВЫЙ ФУНКЦИОНАЛ: Специальная обработка для заголовков/разделов
-        is_heading = self._is_heading(para)
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Сначала пробуем локальную замену (которая гарантированно сохраняет файл)
+        # Только если локальная не сработает, создадим Document() для работы с параграфом
+        logger.info(f"🔄 СНАЧАЛА пробуем локальную замену (которая гарантированно сохраняет файл)")
+        local_replaced_first = mcp_client._replace_text_locally_with_tables(
+            filename, target_text, new_text, paragraph_index
+        )
+        
+        if local_replaced_first:
+            # Проверяем результат локальной замены
+            verify_doc_local = Document(filename)
+            verify_success_local = False
+            
+            if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(verify_doc_local.paragraphs):
+                verify_para_text_local = verify_doc_local.paragraphs[paragraph_index].text
+                if new_text in verify_para_text_local or target_text not in verify_para_text_local:
+                    verify_success_local = True
+                    replaced = True
+                    logger.info(f"✅ Локальная замена выполнена успешно и подтверждена в параграфе {paragraph_index}")
+                else:
+                    logger.warning(f"⚠️ Локальная замена вернула успех, но текст не найден в параграфе {paragraph_index}")
+            else:
+                # Проверяем по всему документу
+                all_text_local = "\n".join([p.text for p in verify_doc_local.paragraphs])
+                if new_text in all_text_local or target_text not in all_text_local:
+                    verify_success_local = True
+                    replaced = True
+                    logger.info(f"✅ Локальная замена выполнена успешно и подтверждена (по всему документу)")
+                else:
+                    logger.warning(f"⚠️ Локальная замена вернула успех, но текст не найден в документе")
+            
+            del verify_doc_local  # Освобождаем память
+        
+        # ТОЛЬКО если локальная замена не сработала, создаем Document() для работы с параграфом
+        if not replaced:
+            logger.info(f"🔄 Локальная замена не сработала, создаем Document() для работы с параграфом")
+            doc = Document(filename)
+            para = doc.paragraphs[paragraph_index]
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Специальная обработка для заголовков/разделов (только если локальная не сработала)
+        if not replaced:
+            is_heading = self._is_heading(para)
         # Проверяем описание на наличие явных указаний на замену заголовка/наименования раздела
         # Важно: применяем специальную обработку только если явно указано, что нужно изменить заголовок/наименование
         description_lower = description.lower()
@@ -4709,7 +4761,7 @@ class DocumentChangeAgent:
                         logger.warning(f"⚠️ Ошибка при замене с нормализацией: {e}")
         
         # НОВЫЙ ФУНКЦИОНАЛ: Последняя попытка - прямая замена через очистку runs
-        if not replaced and target_text in para.text:
+        if not replaced and doc is not None and para is not None and target_text in para.text:
             logger.info(f"🔍 Последняя попытка: прямая замена через очистку всех runs")
             try:
                 para_text = para.text
@@ -4733,25 +4785,25 @@ class DocumentChangeAgent:
             except Exception as e:
                 logger.error(f"❌ Ошибка при замене через очистку runs: {e}")
         
-        if not replaced:
+        if not replaced and doc is not None:
             # НОВЫЙ ФУНКЦИОНАЛ: Расширенная попытка замены в других параграфах
             logger.info(f"🔍 Расширенный поиск для замены текста '{target_text}'")
             replaced = await self._enhanced_replace_attempt(doc, target_text, new_text, paragraph_index)
             
             if not replaced:
                 # Пробуем найти в других параграфах (старая логика)
-                for para in doc.paragraphs:
-                    if self._replace_in_paragraph(para, target_text, new_text):
+                for para_other in doc.paragraphs:
+                    if self._replace_in_paragraph(para_other, target_text, new_text):
                         replaced = True
                         break
                     
                     # НОВЫЙ ФУНКЦИОНАЛ: Также пробуем надежную замену в других параграфах
-                    if self._robust_replace_in_paragraph(para, target_text, new_text):
+                    if self._robust_replace_in_paragraph(para_other, target_text, new_text):
                         replaced = True
                         break
         
         # НОВЫЙ ФУНКЦИОНАЛ: Попытка замены без учета регистра, если match_case=True и замена не удалась
-        if not replaced and match_case:
+        if not replaced and doc is not None and para is not None and match_case:
             logger.info(f"🔧 Попытка замены без учета регистра (match_case=True, но замена не удалась)")
             try:
                 para_text = para.text
@@ -4770,8 +4822,8 @@ class DocumentChangeAgent:
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка при замене без учета регистра: {e}")
         
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Сначала пробуем локальную замену (которая гарантированно сохраняет файл)
-        # Только если локальная не сработала, пробуем MCP (который может не сохранить файл)
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если локальная замена в начале не сработала и мы попробовали другие методы,
+        # пробуем еще раз локальную замену и MCP как финальные попытки
         if not replaced:
             logger.info(f"🔧 Финальная попытка: сначала локальная замена (гарантированно сохраняет), затем MCP")
             try:
@@ -4897,7 +4949,7 @@ class DocumentChangeAgent:
         # НОВЫЙ ФУНКЦИОНАЛ: Проверка, находится ли текст в содержании (оглавлении)
         # Если текст найден в таблице и это похоже на содержание, синхронизируем с заголовком
         is_in_table_of_contents = False
-        if not replaced:
+        if not replaced and doc is not None:
             # Проверяем, может быть текст находится в содержании
             try:
                 # Ищем текст в таблицах
@@ -4950,7 +5002,7 @@ class DocumentChangeAgent:
                 logger.warning(f"⚠️ Ошибка при проверке содержания: {toc_e}")
         
         # НОВЫЙ ФУНКЦИОНАЛ: Финальная проверка замены перед сохранением
-        if not replaced:
+        if not replaced and doc is not None and para is not None:
             # Последняя попытка: проверяем, может быть текст уже заменен (например, через paragraph.text)
             final_para_text = para.text
             if new_text in final_para_text and target_text not in final_para_text:
@@ -4977,7 +5029,11 @@ class DocumentChangeAgent:
                 "message": f"Не удалось заменить '{target_text}' в найденном параграфе. Испробованы все методы замены.",
             }
 
-        doc.save(filename)
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Сохраняем только если doc был создан (т.е. локальная замена не сработала)
+        # Если локальная замена сработала, файл уже сохранен и doc = None
+        if doc is not None:
+            doc.save(filename)
+            logger.info(f"💾 Документ сохранен после замены через Document() (локальная замена не сработала)")
         
         # НОВЫЙ ФУНКЦИОНАЛ: Финальная проверка после сохранения
         try:
