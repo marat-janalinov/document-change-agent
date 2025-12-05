@@ -413,7 +413,6 @@ class DocumentChangeAgent:
                 search_terms = []
                 
                 # Извлекаем потенциальные поисковые термины из инструкции
-                import re
                 quoted_text = re.findall(r'[«"](.*?)[»"]', instruction_text)
                 if quoted_text:
                     search_terms.extend(quoted_text)
@@ -543,7 +542,6 @@ class DocumentChangeAgent:
         analysis["is_table_change"] = True
         
         try:
-            import re
             
             # Правильно извлекаем целевой текст из инструкции
             instruction_data = self._extract_target_and_new_text(instruction_text)
@@ -687,7 +685,6 @@ class DocumentChangeAgent:
         
         try:
             # Ищем таблицы в тексте по характерным паттернам
-            import re
             
             # Паттерны для поиска таблиц
             table_patterns = [
@@ -798,7 +795,6 @@ class DocumentChangeAgent:
             return "unknown"
         
         # Анализируем паттерны в образцах
-        import re
         
         # Проверяем на аббревиатуры (короткие заглавные буквы)
         abbrev_count = sum(1 for s in samples if re.match(r'^[А-ЯЁ]{2,5}$', s.strip()))
@@ -829,7 +825,6 @@ class DocumentChangeAgent:
         Returns:
             Результат анализа структуры таблицы
         """
-        import re
         
         # Ищем признаки таблицы сокращений
         abbreviation_patterns = [
@@ -886,7 +881,6 @@ class DocumentChangeAgent:
         """
         Правильно извлекает целевой текст и новый текст из инструкции.
         """
-        import re
         result = {
             "target_text": "",
             "new_text": "",
@@ -1003,7 +997,6 @@ class DocumentChangeAgent:
         
         try:
             # Анализируем содержимое инструкции
-            import re
             
             # Ищем паттерны изменения ключа и описания
             # Например: "ПД Проектные дирекции 1,2,3,4,5,6."
@@ -1114,7 +1107,6 @@ class DocumentChangeAgent:
         Returns:
             Анализ содержимого
         """
-        import re
         
         # Разбиваем содержимое на части
         parts = new_content.split()
@@ -1320,7 +1312,6 @@ class DocumentChangeAgent:
                 ]
                 
                 # Добавляем варианты с разными пробелами (универсально для любых фраз)
-                import re
                 # Нормализуем пробелы вокруг союзов и предлогов
                 normalized = re.sub(r'\s+и\s+', ' и ', target_phrase)
                 if normalized != target_phrase:
@@ -1411,7 +1402,6 @@ class DocumentChangeAgent:
                     
                     # Если все еще не нашли, пробуем извлечь из description
                     if not target_text and description:
-                        import re
                         # Ищем текст в кавычках в description
                         quote_match = re.search(r'[«"]([^»"]+)[»"]', description)
                         if quote_match:
@@ -1721,7 +1711,6 @@ class DocumentChangeAgent:
             doc_text = await mcp_client.get_document_text(source_file)
             
             # Ищем строку с ключом
-            import re
             
             # Паттерн для поиска строки таблицы с ключом
             # Предполагаем, что строка содержит ключ и описание, разделенные табуляцией или пробелами
@@ -1995,7 +1984,6 @@ class DocumentChangeAgent:
         """
         logger.info("🔍 Прямое извлечение изменений из текста...")
         
-        import re
         
         changes = []
         
@@ -2171,7 +2159,6 @@ class DocumentChangeAgent:
                             
                             # Извлекаем номер пункта для DELETE_PARAGRAPH или "Изложить пункт X"
                             if is_delete_paragraph or is_full_paragraph_replacement:
-                                import re
                                 paragraph_num_match = re.search(r'пункт[е]?\s+(\d+)', description_lower)
                                 if paragraph_num_match:
                                     paragraph_num = paragraph_num_match.group(1)
@@ -2219,7 +2206,6 @@ class DocumentChangeAgent:
                         if self._original_instructions_text:
                             logger.info(f"🔍 CHG-{index:03d}: последняя попытка - поиск в исходных инструкциях")
                             # Ищем паттерн для пунктов: "В пункте N слова «...»"
-                            import re
                             paragraph_num_match = re.search(r'\d+', target_text)
                             if paragraph_num_match:
                                 paragraph_num = paragraph_num_match.group(0)
@@ -2255,7 +2241,6 @@ class DocumentChangeAgent:
             
             # Проверка на кавычки в target.text (убираем их если есть)
             elif any(quote in target_text for quote in ['«', '»', '"', '"', "'", '„']):
-                import re
                 # Убираем все виды кавычек для поиска в документе
                 cleaned_text = re.sub(r'[«»""\'„]', '', target_text).strip()
                 if cleaned_text != target_text:
@@ -2356,7 +2341,6 @@ class DocumentChangeAgent:
         Returns:
             True если текст похож на номер пункта
         """
-        import re
         
         # Паттерны для номеров пунктов
         patterns = [
@@ -2385,7 +2369,6 @@ class DocumentChangeAgent:
         Returns:
             Извлеченный target.text или None
         """
-        import re
         
         logger.info(f"🔍 ИЗВЛЕЧЕНИЕ TARGET из описания: '{description}'")
         
@@ -2492,7 +2475,6 @@ class DocumentChangeAgent:
         Returns:
             Извлеченный target.text или None
         """
-        import re
         
         logger.info(f"🔍 ИЗВЛЕЧЕНИЕ TARGET для INSERT из описания: '{description}'")
         description_lower = description.lower()
@@ -2540,7 +2522,6 @@ class DocumentChangeAgent:
         Returns:
             Альтернативный target.text или None
         """
-        import re
         
         logger.info(f"🔍 АЛЬТЕРНАТИВНОЕ ИЗВЛЕЧЕНИЕ для: '{description}'")
         
@@ -2644,7 +2625,6 @@ class DocumentChangeAgent:
             description = local_change.get("description", "").lower()
             payload_new_text = local_change.get("payload", {}).get("new_text", "").lower()
             # Также проверяем исходный target_text из описания (может быть указан в кавычках)
-            import re
             quoted_texts = re.findall(r'[«"](.*?)[»"]', description)
             
             # Проверяем, содержит ли локальное изменение текст, который изменяется глобальной заменой
@@ -2809,7 +2789,6 @@ class DocumentChangeAgent:
             Список изменений в формате JSON или None
         """
         import json
-        import re
         
         try:
             # Ищем JSON блок в ответе
@@ -3276,7 +3255,6 @@ class DocumentChangeAgent:
             # Попытка исправить распространенные проблемы
             try:
                 # Удаление trailing commas
-                import re
                 content_fixed = re.sub(r',\s*}', '}', content_cleaned)
                 content_fixed = re.sub(r',\s*]', ']', content_fixed)
                 parsed = json.loads(content_fixed)
@@ -3289,7 +3267,6 @@ class DocumentChangeAgent:
                 # Если не удалось исправить, пробуем извлечь JSON из текста
                 try:
                     # Ищем JSON объект в тексте
-                    import re
                     json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content_cleaned, re.DOTALL)
                     if json_match:
                         parsed = json.loads(json_match.group(0))
@@ -4021,7 +3998,6 @@ class DocumentChangeAgent:
                 score += position_score
                 
                 # Критерий 4: Точное совпадение с описанием (если есть упоминание номера пункта/главы)
-                import re
                 # Ищем номера в описании
                 numbers_in_desc = re.findall(r'\d+', description)
                 if numbers_in_desc:
@@ -4225,7 +4201,6 @@ class DocumentChangeAgent:
                     }
             
             # Стратегия 2: Поиск по номеру пункта из описания
-            import re
             punkt_match = re.search(r'пункт[еа]?\s+(\d+)', description, re.IGNORECASE)
             if punkt_match:
                 punkt_num = punkt_match.group(1)
@@ -4589,7 +4564,6 @@ class DocumentChangeAgent:
                         new_para_text = para_text.replace(target_text, new_text, 1)
                     else:
                         # Замена без учета регистра
-                        import re
                         pattern = re.escape(target_text)
                         new_para_text = re.sub(pattern, new_text, para_text, count=1, flags=re.IGNORECASE)
                     
@@ -4714,7 +4688,6 @@ class DocumentChangeAgent:
                 # Ищем текст без учета регистра
                 if target_text.lower() in para_text.lower():
                     # Находим точное вхождение (с учетом регистра как в документе)
-                    import re
                     pattern = re.escape(target_text)
                     match = re.search(pattern, para_text, re.IGNORECASE)
                     if match:
@@ -4873,7 +4846,6 @@ class DocumentChangeAgent:
                             cell_text = cell.text.strip()
                             if target_text in cell_text or cell_text in target_text:
                                 # Проверяем, похоже ли это на содержание (есть номер страницы или точки)
-                                import re
                                 # Содержание обычно имеет формат: "1. Название ........ 5"
                                 if re.search(r'[. ]+\d+$', cell_text) or re.match(r'^\d+\.', cell_text):
                                     is_in_table_of_contents = True
@@ -5005,7 +4977,6 @@ class DocumentChangeAgent:
             # Извлекаем название таблицы из описания (если указано)
             table_name = None
             if "таблице" in description.lower():
-                import re
                 # Ищем паттерн "в таблице «название»" или "таблице 'название'"
                 patterns = [
                     r'таблице\s*[«"](.*?)[»"]',  # таблице «название»
@@ -5176,7 +5147,6 @@ class DocumentChangeAgent:
                         
                         # Гибкая проверка: ищем ключевые слова из названия таблицы
                         # Разбиваем название на слова и проверяем, что хотя бы 2-3 ключевых слова присутствуют
-                        import re
                         # Убираем служебные слова
                         stop_words = {'и', 'в', 'на', 'с', 'по', 'для', 'от', 'до', 'из', 'к', 'о', 'об', 'обо', 'со', 'во'}
                         table_name_words = [w for w in re.findall(r'\b\w+\b', table_name_lower) if w not in stop_words and len(w) > 2]
@@ -5653,7 +5623,6 @@ class DocumentChangeAgent:
         Returns:
             Тип столбца
         """
-        import re
         
         if not content:
             return "empty"
@@ -6456,7 +6425,6 @@ class DocumentChangeAgent:
             punkt_locations = []
             
             # Ищем в параграфах с более точным поиском
-            import re
             for para_idx, para in enumerate(doc.paragraphs):  # Ищем во всех параграфах
                 para_text = para.text.strip()
                 # Используем точные regex паттерны для начала строки
@@ -6758,7 +6726,6 @@ class DocumentChangeAgent:
             return {"table_data": None, "text_content": None}
         
         try:
-            import re
             doc = Document(changes_file)
             result = {"table_data": None, "text_content": None}
             
@@ -6922,7 +6889,6 @@ class DocumentChangeAgent:
         Returns:
             Результат операции
         """
-        import re
         doc = Document(filename)
         
         # Ищем параграф с номером пункта
@@ -7069,7 +7035,6 @@ class DocumentChangeAgent:
             replacements_made = 0
             
             # Извлекаем номер пункта из описания
-            import re
             punkt_match = re.search(r'пункт[е]?\s+(\d+)', description, re.IGNORECASE)
             punkt_number = punkt_match.group(1) if punkt_match else None
             if not punkt_number and target_text:
@@ -7778,7 +7743,6 @@ class DocumentChangeAgent:
         Returns:
             True если target_text является частью номера пункта
         """
-        import re
         
         # Если указан номер пункта, проверяем напрямую
         if punkt_number:
@@ -7884,7 +7848,6 @@ class DocumentChangeAgent:
                         original_text = para.text
                         
                         # Проверяем, начинается ли параграф с номера пункта
-                        import re
                         # Более точная проверка номера пункта: "32.", "32)", "32:", "32 "
                         punkt_match = re.match(r'^(\d+[\.\):]?\s*)', original_text)
                         
@@ -8037,7 +8000,6 @@ class DocumentChangeAgent:
         original_text = paragraph.text
         
         # Проверяем, начинается ли параграф с номера пункта
-        import re
         punkt_match = re.match(r'^(\d+\.?\s*)', original_text)
         
         if punkt_match:
@@ -8184,7 +8146,6 @@ class DocumentChangeAgent:
             }
 
         doc = Document(filename)
-        import re
 
         # Проверяем, является ли text_to_remove номером пункта
         paragraph_num = None
@@ -8314,7 +8275,6 @@ class DocumentChangeAgent:
             
             # Извлекаем название таблицы из описания
             table_name = None
-            import re
             table_name_match = re.search(r'таблиц[еи]\s+[«"]([^«"]+)[»"]', description, re.IGNORECASE)
             if table_name_match:
                 table_name = table_name_match.group(1)
@@ -8848,7 +8808,6 @@ class DocumentChangeAgent:
                     logger.info(f"ADD_COMMENT: информация о таблице из match: {location}")
                     
                     # Извлекаем номер таблицы из location (например, "Table 0")
-                    import re
                     table_num_match = re.search(r'Table\s+(\d+)', location)
                     if table_num_match:
                         table_num = int(table_num_match.group(1))
@@ -9299,7 +9258,6 @@ class DocumentChangeAgent:
                 return matches
         
         # Стратегия 3: Поиск с различными вариантами пунктуации
-        import re
         # Удаляем лишние пробелы и пунктуацию для поиска
         cleaned_text = re.sub(r'[^\w\s]', '', target_text)
         cleaned_text = " ".join(cleaned_text.split())
@@ -9401,7 +9359,6 @@ class DocumentChangeAgent:
                     return True
         
         # Стратегия 2: Замена с различными вариантами пунктуации
-        import re
         # Удаляем пунктуацию для поиска
         cleaned_target = re.sub(r'[^\w\s]', '', target_text)
         cleaned_target = " ".join(cleaned_target.split())
@@ -9508,7 +9465,6 @@ class DocumentChangeAgent:
                             elif cell_text in old_heading_text:
                                 # Ячейка содержит только часть заголовка, заменяем всю ячейку
                                 # Сохраняем форматирование (номер страницы, точки и т.д.)
-                                import re
                                 # Пытаемся сохранить номер страницы и точки, если они есть
                                 page_match = re.search(r'([. ]+)(\d+)$', cell_text)
                                 if page_match:
@@ -9559,7 +9515,6 @@ class DocumentChangeAgent:
                     if self._is_heading(para):
                         para_text = para.text.strip()
                         # Извлекаем текст без номера для сравнения
-                        import re
                         # Убираем номер раздела из начала для сравнения
                         heading_text_no_num = re.sub(r'^\d+\.?\s*', '', para_text).strip()
                         old_text_no_num = re.sub(r'^\d+\.?\s*', '', old_heading_text).strip()
