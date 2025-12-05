@@ -233,12 +233,14 @@ class MCPClient:
                 
                 try:
                     result = await self._call_tool("search_and_replace", arguments_without_index)
+                    logger.info(f"MCP замена без paragraph_index выполнена, результат: {result.text[:200] if result.text else 'None'}")
                     
                     # Если стандартная замена не сработала, пробуем локальную замену
                     if not self._message_is_successful(result.text):
-                        logger.info(f"Стандартная замена без paragraph_index не сработала, пробуем локальную замену")
+                        logger.warning(f"Стандартная замена без paragraph_index не сработала, пробуем локальную замену. Ответ MCP: {result.text}")
                         return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
                     
+                    logger.info(f"✅ MCP замена без paragraph_index успешна")
                     return True
                 except RuntimeError as e2:
                     logger.warning(f"Замена без paragraph_index тоже не сработала, пробуем локальную замену: {e2}")
@@ -547,7 +549,8 @@ class MCPClient:
         paragraph_index: Optional[int] = None,
     ) -> bool:
         """
-        Локальная замена текста с поддержкой таблиц через python-docx
+        Локальная замена текста с поддержкой таблиц через python-docx.
+        Использует надежный метод замены для текста, разбитого на несколько runs.
         """
         try:
             from docx import Document
@@ -555,37 +558,102 @@ class MCPClient:
             doc = Document(filename)
             replacements_made = 0
             
+            # Если указан конкретный параграф, пробуем сначала его
+            if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(doc.paragraphs):
+                target_paragraphs = [doc.paragraphs[paragraph_index]]
+                logger.info(f"Локальная замена: попытка в параграфе {paragraph_index}")
+            else:
+                target_paragraphs = doc.paragraphs
+            
             # Замена в обычных параграфах
-            for paragraph in doc.paragraphs:
-                if old_text in paragraph.text:
-                    # Заменяем текст в параграфе
+            for para_idx, paragraph in enumerate(target_paragraphs):
+                para_full_text = paragraph.text
+                
+                # Проверяем, содержит ли параграф искомый текст
+                if old_text in para_full_text:
+                    logger.info(f"Локальная замена: найден текст в параграфе {para_idx if paragraph_index is None else paragraph_index}")
+                    
+                    # Если текст найден, пробуем разные стратегии замены
+                    # Стратегия 1: Прямая замена через paragraph.text (проще всего)
+                    try:
+                        new_para_text = para_full_text.replace(old_text, new_text, 1)
+                        if new_para_text != para_full_text:
+                            # Очищаем все runs и создаем новый с замененным текстом
+                            paragraph.clear()
+                            paragraph.add_run(new_para_text)
+                            replacements_made += 1
+                            logger.info(f"✅ Локальная замена: заменен через paragraph.text в параграфе {para_idx if paragraph_index is None else paragraph_index}")
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Не удалось заменить через paragraph.text: {e}")
+                    
+                    # Стратегия 2: Замена в отдельных runs (если текст в одном run)
+                    found_in_runs = False
                     for run in paragraph.runs:
                         if old_text in run.text:
-                            run.text = run.text.replace(old_text, new_text)
+                            run.text = run.text.replace(old_text, new_text, 1)
                             replacements_made += 1
+                            found_in_runs = True
+                            logger.info(f"✅ Локальная замена: заменен в run параграфа {para_idx if paragraph_index is None else paragraph_index}")
+                            break
+                    
+                    if not found_in_runs:
+                        # Стратегия 3: Текст разбит на несколько runs - используем сегментную замену
+                        try:
+                            # Объединяем все runs для замены
+                            all_text_parts = []
+                            run_starts = []
+                            current_pos = 0
+                            
+                            for run in paragraph.runs:
+                                run_starts.append(current_pos)
+                                all_text_parts.append(run.text)
+                                current_pos += len(run.text)
+                            
+                            combined_text = "".join(all_text_parts)
+                            
+                            if old_text in combined_text:
+                                # Находим позицию начала текста
+                                start_idx = combined_text.find(old_text)
+                                end_idx = start_idx + len(old_text)
+                                
+                                # Заменяем текст
+                                new_combined = combined_text[:start_idx] + new_text + combined_text[end_idx:]
+                                
+                                # Очищаем параграф и создаем новый run с замененным текстом
+                                paragraph.clear()
+                                paragraph.add_run(new_combined)
+                                replacements_made += 1
+                                logger.info(f"✅ Локальная замена: заменен через сегментную замену в параграфе {para_idx if paragraph_index is None else paragraph_index}")
+                        except Exception as e:
+                            logger.warning(f"Не удалось выполнить сегментную замену: {e}")
             
-            # Замена в таблицах
-            for table in doc.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        if old_text in cell.text:
-                            # Заменяем текст в ячейке таблицы
-                            for paragraph in cell.paragraphs:
-                                for run in paragraph.runs:
-                                    if old_text in run.text:
-                                        run.text = run.text.replace(old_text, new_text)
+            # Замена в таблицах (если не указан конкретный параграф или замен не было)
+            if replacements_made == 0 or paragraph_index is None:
+                for table_idx, table in enumerate(doc.tables):
+                    for row_idx, row in enumerate(table.rows):
+                        for cell_idx, cell in enumerate(row.cells):
+                            for para_idx, cell_para in enumerate(cell.paragraphs):
+                                if old_text in cell_para.text:
+                                    try:
+                                        new_cell_text = cell_para.text.replace(old_text, new_text, 1)
+                                        cell_para.clear()
+                                        cell_para.add_run(new_cell_text)
                                         replacements_made += 1
+                                        logger.info(f"✅ Локальная замена: заменен в таблице {table_idx}, ячейка [{row_idx},{cell_idx}], параграф {para_idx}")
+                                    except Exception as e:
+                                        logger.warning(f"Не удалось заменить в ячейке таблицы: {e}")
             
             if replacements_made > 0:
                 doc.save(filename)
-                logger.info(f"Локальная замена выполнена: {replacements_made} замен текста '{old_text}' на '{new_text}'")
+                logger.info(f"✅ Локальная замена выполнена: {replacements_made} замен текста (первые 50 символов старого: '{old_text[:50]}...', нового: '{new_text[:50]}...')")
                 return True
             else:
-                logger.warning(f"Текст '{old_text}' не найден в документе для замены")
+                logger.warning(f"⚠️ Локальная замена: текст '{old_text[:100]}...' не найден в документе для замены")
                 return False
                 
         except Exception as e:
-            logger.error(f"Ошибка при локальной замене текста: {e}")
+            logger.error(f"❌ Ошибка при локальной замене текста: {e}", exc_info=True)
             return False
 
     @staticmethod

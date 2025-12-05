@@ -4644,6 +4644,8 @@ class DocumentChangeAgent:
                     paragraph_index=paragraph_index
                 )
                 
+                logger.info(f"📊 Результат MCP replace_text: {mcp_replaced} (параграф {paragraph_index})")
+                
                 if mcp_replaced:
                     logger.info(f"✅ Замена выполнена через MCP replace_text")
                     # Перезагружаем документ и проверяем результат
@@ -4667,7 +4669,7 @@ class DocumentChangeAgent:
                         # Все равно считаем успешным, если MCP вернул True
                         replaced = True
                 else:
-                    logger.warning(f"⚠️ MCP replace_text не удалась, пробуем без указания параграфа")
+                    logger.warning(f"⚠️ MCP replace_text не удалась с paragraph_index={paragraph_index}, пробуем без указания параграфа")
                     # Пробуем без указания конкретного параграфа (глобальная замена)
                     mcp_replaced = await mcp_client.replace_text(
                         filename=filename,
@@ -4675,6 +4677,7 @@ class DocumentChangeAgent:
                         new_text=new_text,
                         paragraph_index=None
                     )
+                    logger.info(f"📊 Результат MCP replace_text (без paragraph_index): {mcp_replaced}")
                     if mcp_replaced:
                         logger.info(f"✅ Замена выполнена через MCP replace_text (глобально)")
                         # Проверяем результат
