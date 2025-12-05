@@ -4582,7 +4582,8 @@ class DocumentChangeAgent:
             }
 
         # ИНТЕЛЛЕКТУАЛЬНАЯ ЗАМЕНА В ПАРАГРАФАХ: Проверяем, не является ли это заменой в пункте
-        if "пункте" in description and len(matches) >= 1:
+        is_point_change = "пункте" in description.lower() or "пункт" in description.lower()
+        if is_point_change and len(matches) >= 1:
             logger.info("📋 ОБНАРУЖЕНО ИЗМЕНЕНИЕ В ПУНКТЕ - используем интеллектуальный поиск")
             
             # Ищем правильный параграф и заменяем только нужную часть
@@ -4643,9 +4644,12 @@ class DocumentChangeAgent:
         # Локальная замена имеет более продвинутую логику для работы с текстом, разбитым на runs
         if master_doc is not None:
             logger.info(f"📄 Работа с единым объектом документа (master_doc) - используем логику локальной замены в памяти")
+            # Определяем, нужно ли строго ограничивать поиск указанным параграфом
+            # Если в описании явно указан пункт, поиск должен быть строго в этом параграфе
+            strict_paragraph = is_point_change and paragraph_index is not None and paragraph_index >= 0
             # Используем логику локальной замены напрямую на master_doc, без сохранения файла
             local_replaced_first = self._replace_text_in_document_object(
-                master_doc, target_text, new_text, paragraph_index
+                master_doc, target_text, new_text, paragraph_index, strict_paragraph=strict_paragraph
             )
         else:
             # Fallback: если master_doc не передан, используем старую логику с локальной заменой
@@ -9230,8 +9234,11 @@ class DocumentChangeAgent:
             if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(doc.paragraphs):
                 target_paragraphs = [doc.paragraphs[paragraph_index]]
                 logger.info(f"Локальная замена в памяти: попытка в параграфе {paragraph_index}")
+                # Сохраняем информацию о том, что указан конкретный параграф для первоначального поиска
+                specific_paragraph_mode = True
             else:
                 target_paragraphs = doc.paragraphs
+                specific_paragraph_mode = False
             
             # Замена в обычных параграфах
             for para_idx, paragraph in enumerate(target_paragraphs):
@@ -9239,7 +9246,8 @@ class DocumentChangeAgent:
                 
                 # Проверяем, содержит ли параграф искомый текст
                 if old_text in para_full_text:
-                    logger.info(f"Локальная замена в памяти: найден текст в параграфе {para_idx if paragraph_index is None else paragraph_index}")
+                    actual_para_idx = para_idx if paragraph_index is None else paragraph_index
+                    logger.info(f"Локальная замена в памяти: найден текст в параграфе {actual_para_idx}")
                     
                     # Стратегия 1: Прямая замена через paragraph.text
                     try:
@@ -9249,8 +9257,8 @@ class DocumentChangeAgent:
                             paragraph.clear()
                             paragraph.add_run(new_para_text)
                             replacements_made += 1
-                            logger.info(f"✅ Локальная замена в памяти: заменен через paragraph.text в параграфе {para_idx if paragraph_index is None else paragraph_index}")
-                            continue
+                            logger.info(f"✅ Локальная замена в памяти: заменен через paragraph.text в параграфе {actual_para_idx}")
+                            return True  # Успешно заменено, выходим
                     except Exception as e:
                         logger.debug(f"Не удалось заменить через paragraph.text: {e}")
                     
@@ -9261,8 +9269,8 @@ class DocumentChangeAgent:
                             run.text = run.text.replace(old_text, new_text, 1)
                             replacements_made += 1
                             found_in_runs = True
-                            logger.info(f"✅ Локальная замена в памяти: заменен в run параграфа {para_idx if paragraph_index is None else paragraph_index}")
-                            break
+                            logger.info(f"✅ Локальная замена в памяти: заменен в run параграфа {actual_para_idx}")
+                            return True  # Успешно заменено, выходим
                     
                     if not found_in_runs:
                         # Стратегия 3: Текст разбит на несколько runs - используем сегментную замену
@@ -9289,13 +9297,19 @@ class DocumentChangeAgent:
                                 paragraph.clear()
                                 paragraph.add_run(new_combined)
                                 replacements_made += 1
-                                logger.info(f"✅ Локальная замена в памяти: заменен через сегментную замену в параграфе {para_idx if paragraph_index is None else paragraph_index}")
+                                logger.info(f"✅ Локальная замена в памяти: заменен через сегментную замену в параграфе {actual_para_idx}")
+                                return True  # Успешно заменено, выходим
                         except Exception as e:
                             logger.warning(f"Не удалось выполнить сегментную замену: {e}")
-                    
-                    # ВАЖНО: Если указан конкретный параграф, не ищем в других местах
-                    if paragraph_index is not None and paragraph_index >= 0:
-                        break
+                
+                # ВАЖНО: Если указан конкретный параграф и текст не найден, расширяем поиск
+                if specific_paragraph_mode and paragraph_index is not None and paragraph_index >= 0:
+                    # Текст не найден в указанном параграфе, ищем во всех остальных
+                    logger.warning(f"⚠️ Текст не найден в указанном параграфе {paragraph_index}, расширяем поиск по всему документу")
+                    specific_paragraph_mode = False  # Переключаемся на поиск по всему документу
+                    target_paragraphs = [p for idx, p in enumerate(doc.paragraphs) if idx != paragraph_index]
+                    # Продолжаем цикл с новым списком параграфов
+                    continue
             
             # Замена в таблицах (только если paragraph_index == -1 или None и не найдено в параграфах)
             should_check_tables = (
