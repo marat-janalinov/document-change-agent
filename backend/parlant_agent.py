@@ -2729,7 +2729,17 @@ class DocumentChangeAgent:
             
             # Извлекаем JSON из ответа
             response_text = response.choices[0].message.content.strip()
-            logger.info(f"🔍 ОТВЕТ LLM (первые 500 символов): {response_text[:500]}...")
+            logger.info(f"📥 Сырой ответ от LLM (первые 1000 символов): {response_text[:1000]}...")
+            logger.info(f"📥 Полный сырой ответ от LLM (длина: {len(response_text)} символов): {response_text}")
+            # КРИТИЧЕСКОЕ: Всегда логируем полный ответ для диагностики проблем с множественными инструкциями
+            
+            # КРИТИЧЕСКОЕ: Подсчитываем примерное количество инструкций для сравнения с ответом LLM
+            instruction_count_indicators = [
+                "CHG-", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.",
+                "изложить", "заменить", "исключить", "добавить", "удалить", "изменить"
+            ]
+            estimated_instructions = sum(1 for indicator in instruction_count_indicators if indicator in changes_text.lower())
+            logger.info(f"📊 ОЦЕНКА КОЛИЧЕСТВА ИНСТРУКЦИЙ В ИСХОДНОМ ТЕКСТЕ: {estimated_instructions} (по индикаторам)")
             
             # Парсим JSON
             changes_json = self._extract_json_from_response(response_text)
@@ -2737,6 +2747,21 @@ class DocumentChangeAgent:
                 raise ValueError("Не удалось извлечь JSON из ответа LLM")
             
             logger.info(f"🔍 ИЗВЛЕЧЕННЫЙ JSON: {changes_json}")
+            
+            # КРИТИЧЕСКОЕ: Проверяем количество найденных инструкций
+            if isinstance(changes_json, list):
+                logger.info(f"📊 LLM вернул {len(changes_json)} изменений")
+                if estimated_instructions > len(changes_json):
+                    logger.warning(
+                        f"⚠️ КРИТИЧЕСКОЕ ВНИМАНИЕ: В тексте, вероятно, содержится {estimated_instructions} инструкций "
+                        f"(найдено индикаторов: {estimated_instructions}), но LLM вернул только {len(changes_json)} изменений. "
+                        f"LLM мог остановиться на первой инструкции или не прочитать весь документ!"
+                    )
+                    logger.warning(
+                        f"⚠️ ПРОВЕРКА: Первые 500 символов текста инструкций: {changes_text[:500]}"
+                    )
+            else:
+                logger.warning(f"⚠️ LLM вернул не список: {type(changes_json)}")
             
             # Исправляем операции REPLACE_POINT_TEXT -> REPLACE_TEXT
             for change in changes_json:
