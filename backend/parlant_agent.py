@@ -3206,6 +3206,9 @@ class DocumentChangeAgent:
         
         try:
             # OpenAI SDK использует timeout из http_client, который уже установлен в 300 секунд
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: response_format={"type": "json_object"} заставляет LLM вернуть один объект
+            # Это может быть причиной, почему возвращается только одна инструкция!
+            # Убираем response_format или явно указываем, что нужен массив
             response = await self.openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
@@ -3214,7 +3217,7 @@ class DocumentChangeAgent:
                 ],
                 temperature=0,
                 max_tokens=16384,  # Максимальное значение для completion tokens (gpt-4o поддерживает до 16384)
-                response_format={"type": "json_object"},
+                # УБРАНО: response_format={"type": "json_object"} - это может заставлять LLM возвращать один объект вместо массива!
             )
             logger.info("Ответ от LLM получен успешно")
         except Exception as e:
@@ -5033,11 +5036,46 @@ class DocumentChangeAgent:
                 "message": f"Не удалось заменить '{target_text}' в найденном параграфе. Испробованы все методы замены.",
             }
 
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Сохраняем только если doc был создан (т.е. локальная замена не сработала)
-        # Если локальная замена сработала, файл уже сохранен и doc = None
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ВСЕГДА убеждаемся, что файл сохранен
+        # Даже если локальная замена вернула True, она могла не сохранить файл
+        # Поэтому проверяем и сохраняем в любом случае
         if doc is not None:
             doc.save(filename)
             logger.info(f"💾 Документ сохранен после замены через Document() (локальная замена не сработала)")
+        elif replaced:
+            # Если локальная замена сработала (replaced = True), но мы не создали doc,
+            # нужно убедиться, что файл действительно сохранен
+            # Переоткрываем файл и проверяем, что изменения там есть
+            try:
+                verify_final_doc = Document(filename)
+                verify_success = False
+                
+                if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(verify_final_doc.paragraphs):
+                    verify_para_text = verify_final_doc.paragraphs[paragraph_index].text
+                    if new_text in verify_para_text or target_text not in verify_para_text:
+                        verify_success = True
+                else:
+                    all_text = "\n".join([p.text for p in verify_final_doc.paragraphs])
+                    if new_text in all_text or target_text not in all_text:
+                        verify_success = True
+                
+                if not verify_success:
+                    # Локальная замена вернула True, но файл не содержит изменений!
+                    # Это критическая ошибка - локальная замена не сохранила файл
+                    logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Локальная замена вернула True, но файл не содержит изменений!")
+                    logger.error(f"❌ Пробуем сохранить через новый Document()...")
+                    # Создаем новый Document и пробуем заменить еще раз
+                    final_doc = Document(filename)
+                    if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(final_doc.paragraphs):
+                        final_para = final_doc.paragraphs[paragraph_index]
+                        if target_text in final_para.text:
+                            final_para.text = final_para.text.replace(target_text, new_text, 1)
+                            final_doc.save(filename)
+                            logger.info(f"✅ Исправлено: файл сохранен с изменениями")
+                        else:
+                            logger.error(f"❌ Текст '{target_text}' не найден в параграфе {paragraph_index} для повторной замены")
+            except Exception as verify_final_e:
+                logger.error(f"❌ Ошибка при финальной проверке сохранения: {verify_final_e}", exc_info=True)
         
         # НОВЫЙ ФУНКЦИОНАЛ: Финальная проверка после сохранения
         try:
