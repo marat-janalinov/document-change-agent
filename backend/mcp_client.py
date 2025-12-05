@@ -667,9 +667,14 @@ class MCPClient:
                                 logger.info(f"✅ Локальная замена: заменен через сегментную замену в параграфе {para_idx if paragraph_index is None else paragraph_index}")
                         except Exception as e:
                             logger.warning(f"Не удалось выполнить сегментную замену: {e}")
+                    
+                    # ВАЖНО: Если указан конкретный параграф, не ищем в других местах
+                    if paragraph_index is not None and paragraph_index >= 0:
+                        break
             
-            # Замена в таблицах (если не указан конкретный параграф или замен не было)
-            if replacements_made == 0 or paragraph_index is None:
+            # Замена в таблицах ТОЛЬКО если не указан конкретный параграф
+            # (если указан paragraph_index, изменения строго по инструкции - только в указанном месте)
+            if replacements_made == 0 and paragraph_index is None:
                 for table_idx, table in enumerate(doc.tables):
                     for row_idx, row in enumerate(table.rows):
                         for cell_idx, cell in enumerate(row.cells):
