@@ -4132,7 +4132,8 @@ class DocumentChangeAgent:
         self,
         filename: str,
         change: Dict[str, Any],
-        original_details: Dict[str, Any]
+        original_details: Dict[str, Any],
+        master_doc: Optional[Document] = None  # Единый объект документа для всех изменений
     ) -> Dict[str, Any]:
         """
         НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка замены текста с альтернативными стратегиями.
@@ -4146,7 +4147,12 @@ class DocumentChangeAgent:
         
         logger.info(f"🔄 Стратегия 1: Попытка замены через прямое обращение к документу")
         try:
-            doc = Document(filename)
+            # Используем master_doc, если передан, иначе создаем новый
+            if master_doc is not None:
+                doc = master_doc
+                logger.info(f"📄 Используем master_doc для повторной попытки замены")
+            else:
+                doc = Document(filename)
             
             # Стратегия 1: Прямой поиск и замена в параграфах
             replaced_count = 0
@@ -4172,7 +4178,11 @@ class DocumentChangeAgent:
                                 logger.info(f"   ✅ Найдено и заменено в таблице: '{target_text}' → '{new_text}'")
             
             if replaced_count > 0:
-                doc.save(filename)
+                # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                # Файл будет сохранен один раз в конце после всех изменений
+                if master_doc is None:
+                    doc.save(filename)
+                    logger.info(f"💾 Файл сохранен после повторной попытки (master_doc не использовался)")
                 logger.info(f"✅ {change_id}: Успешно применено после повторной попытки ({replaced_count} замен)")
                 return {
                     "success": True,
@@ -4223,7 +4233,12 @@ class DocumentChangeAgent:
                     key_words = " ".join(words[:3])
                     logger.info(f"   Поиск по ключевым словам: '{key_words}'")
                     
-                    doc = Document(filename)
+                    # Используем master_doc, если передан, иначе создаем новый
+                    if master_doc is not None:
+                        doc = master_doc
+                        logger.info(f"📄 Используем master_doc для частичной замены")
+                    else:
+                        doc = Document(filename)
                     replaced_count = 0
                     
                     for para in doc.paragraphs:
@@ -4235,7 +4250,10 @@ class DocumentChangeAgent:
                             logger.info(f"   ✅ Частичная замена успешна")
                     
                     if replaced_count > 0:
-                        doc.save(filename)
+                        # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                        if master_doc is None:
+                            doc.save(filename)
+                            logger.info(f"💾 Файл сохранен после частичной замены (master_doc не использовался)")
                         logger.info(f"✅ {change_id}: Успешно применено через частичную замену ({replaced_count} замен)")
                         return {
                             "success": True,
@@ -4274,7 +4292,10 @@ class DocumentChangeAgent:
                     # Удаляем параграф
                     para_element = para._element
                     para_element.getparent().remove(para_element)
-                    doc.save(filename)
+                    # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                    if master_doc is None:
+                        doc.save(filename)
+                        logger.info(f"💾 Файл сохранен после удаления параграфа (master_doc не использовался)")
                     logger.info(f"✅ {change_id}: Параграф успешно удален (индекс {idx})")
                     return {
                         "success": True,
