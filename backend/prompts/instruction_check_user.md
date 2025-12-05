@@ -51,22 +51,30 @@
 **ПАРАГРАФ:** "В пункте 32 слова «согласовывается с ДО и ДРМ» изложить: «согласовывается с ДО»"
 ```json
 {
-  "change_id": "CHG-002",
-  "operation": "REPLACE_TEXT", 
-  "target": { "text": "согласовывается с ДО и ДРМ" },
-  "payload": { "new_text": "согласовывается с ДО" },
-  "description": "Изменение слов в пункте 32"
+  "changes": [
+    {
+      "change_id": "CHG-002",
+      "operation": "REPLACE_TEXT", 
+      "target": { "text": "согласовывается с ДО и ДРМ" },
+      "payload": { "new_text": "согласовывается с ДО" },
+      "description": "Изменение слов в пункте 32"
+    }
+  ]
 }
 ```
 
 **МАССОВАЯ ЗАМЕНА:** "По всему тексту аббревиатуру «ДРМ» заменить аббревиатурой «ДКР»"
 ```json
 {
-  "change_id": "CHG-003",
-  "operation": "REPLACE_TEXT",
-  "target": { "text": "ДРМ", "replace_all": true },
-  "payload": { "new_text": "ДКР" },
-  "description": "Массовая замена ДРМ на ДКР"
+  "changes": [
+    {
+      "change_id": "CHG-003",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "ДРМ", "replace_all": true },
+      "payload": { "new_text": "ДКР" },
+      "description": "Массовая замена ДРМ на ДКР"
+    }
+  ]
 }
 ```
 
@@ -74,18 +82,22 @@
 → Разбить на 2 операции:
 ```json
 {
-  "change_id": "CHG-004",
-  "operation": "REPLACE_TEXT",
-  "target": { "text": "X" },
-  "payload": { "new_text": "Y" },
-  "description": "В пункте 32 слова X изложить: Y"
-},
-{
-  "change_id": "CHG-005",
-  "operation": "INSERT_PARAGRAPH",
-  "target": { "after_text": "Y" },
-  "payload": { "text": "33. [текст]" },
-  "description": "Добавить пункт 33 после пункта 32"
+  "changes": [
+    {
+      "change_id": "CHG-004",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "X" },
+      "payload": { "new_text": "Y" },
+      "description": "В пункте 32 слова X изложить: Y"
+    },
+    {
+      "change_id": "CHG-005",
+      "operation": "INSERT_PARAGRAPH",
+      "target": { "after_text": "Y" },
+      "payload": { "text": "33. [текст]" },
+      "description": "Добавить пункт 33 после пункта 32"
+    }
+  ]
 }
 ```
 
@@ -93,21 +105,25 @@
 → Разбить на 2 операции:
 ```json
 {
-  "change_id": "CHG-006",
-  "operation": "REPLACE_TEXT",
-  "target": { "text": "X" },
-  "payload": { "new_text": "Y" },
-  "description": "Изменить текст X на Y"
-},
-{
-  "change_id": "CHG-007",
-  "operation": "INSERT_TABLE",
-  "target": { "after_text": "Y" },
-  "payload": { 
-    "rows": [["Заголовок1", "Заголовок2"], ["Данные1", "Данные2"]],
-    "columns": ["Заголовок1", "Заголовок2"]
-  },
-  "description": "Вставить таблицу после текста Y"
+  "changes": [
+    {
+      "change_id": "CHG-006",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "X" },
+      "payload": { "new_text": "Y" },
+      "description": "Изменить текст X на Y"
+    },
+    {
+      "change_id": "CHG-007",
+      "operation": "INSERT_TABLE",
+      "target": { "after_text": "Y" },
+      "payload": { 
+        "rows": [["Заголовок1", "Заголовок2"], ["Данные1", "Данные2"]],
+        "columns": ["Заголовок1", "Заголовок2"]
+      },
+      "description": "Вставить таблицу после текста Y"
+    }
+  ]
 }
 ```
 
@@ -115,13 +131,17 @@
 → Одна операция REPLACE_TEXT, где таблица содержит новое содержимое:
 ```json
 {
-  "change_id": "CHG-008",
-  "operation": "REPLACE_TEXT",
-  "target": { "text": "ПД" },
-  "payload": { 
-    "new_text": "Текст из таблицы (содержимое всех ячеек таблицы, объединенное или структурированное)"
-  },
-  "description": "В таблице строку «ПД» изложить в следующей редакции (из таблицы)"
+  "changes": [
+    {
+      "change_id": "CHG-008",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "ПД" },
+      "payload": { 
+        "new_text": "Текст из таблицы (содержимое всех ячеек таблицы, объединенное или структурированное)"
+      },
+      "description": "В таблице строку «ПД» изложить в следующей редакции (из таблицы)"
+    }
+  ]
 }
 ```
 
@@ -131,18 +151,22 @@
 → Разбить на 2 операции (СОХРАНИТЬ ПОРЯДОК):
 ```json
 {
-  "change_id": "CHG-009",
-  "operation": "REPLACE_TEXT",
-  "target": { "text": "текст из пункта 32" },
-  "payload": { "new_text": "новый текст" },
-  "description": "В пункте 32 изложить в редакции"
-},
-{
-  "change_id": "CHG-010",
-  "operation": "INSERT_PARAGRAPH",
-  "target": { "after_text": "текст пункта 32 (после замены)" },
-  "payload": { "text": "33. Содержимое из таблицы или текст" },
-  "description": "Добавить пункт 33 после пункта 32"
+  "changes": [
+    {
+      "change_id": "CHG-009",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "текст из пункта 32" },
+      "payload": { "new_text": "новый текст" },
+      "description": "В пункте 32 изложить в редакции"
+    },
+    {
+      "change_id": "CHG-010",
+      "operation": "INSERT_PARAGRAPH",
+      "target": { "after_text": "текст пункта 32 (после замены)" },
+      "payload": { "text": "33. Содержимое из таблицы или текст" },
+      "description": "Добавить пункт 33 после пункта 32"
+    }
+  ]
 }
 ```
 
@@ -162,4 +186,37 @@
 
 **ВАЖНО:** Используй "new_text" в payload, НЕ "text"!
 
-Преобразуй найденные инструкции в валидный JSON.
+**КРИТИЧЕСКИ ВАЖНО**: Ответ ДОЛЖЕН быть в формате `{"changes": [...]}` - все найденные изменения должны быть в массиве `changes`!
+
+**ПРИМЕР ОТВЕТА С НЕСКОЛЬКИМИ ИЗМЕНЕНИЯМИ:**
+```json
+{
+  "changes": [
+    {
+      "change_id": "CHG-001",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "ДРМ" },
+      "payload": { "new_text": "ДКР Департамент кредитных рисков" },
+      "description": "Изменение строки ДРМ в таблице"
+    },
+    {
+      "change_id": "CHG-002",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "согласовывается с ДО и ДРМ" },
+      "payload": { "new_text": "согласовывается с ДО" },
+      "description": "Изменение слов в пункте 32"
+    },
+    {
+      "change_id": "CHG-003",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "ДРМ", "replace_all": true },
+      "payload": { "new_text": "ДКР" },
+      "description": "Массовая замена ДРМ на ДКР"
+    }
+  ]
+}
+```
+
+**ВАЖНО**: Если в документе найдено несколько инструкций, ВСЕ они должны быть в массиве `changes`! Не возвращай только один объект изменения - возвращай ВСЕ найденные изменения в массиве!
+
+Преобразуй найденные инструкции в валидный JSON в формате `{"changes": [...]}`.

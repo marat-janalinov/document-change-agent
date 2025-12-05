@@ -3191,9 +3191,13 @@ class DocumentChangeAgent:
         full_prompt = f"{user_prompt}{initial_context}\n\nИНСТРУКЦИИ ДЛЯ АНАЛИЗА:\n'''{changes_text}'''"
         
         logger.info(f"Отправка запроса к LLM: модель={self.model_name}, длина промпта={len(full_prompt)} символов")
+        logger.info(f"📤 System prompt (первые 500 символов): {system_prompt[:500]}...")
+        logger.info(f"📤 User prompt (первые 500 символов): {full_prompt[:500]}...")
         logger.debug(f"System prompt длина: {len(system_prompt)} символов")
         logger.debug(f"User prompt длина: {len(user_prompt)} символов")
         logger.debug(f"Changes text длина: {len(changes_text)} символов")
+        logger.debug(f"📋 ПОЛНЫЙ SYSTEM PROMPT:\n{system_prompt}")
+        logger.debug(f"📋 ПОЛНЫЙ USER PROMPT:\n{full_prompt}")
         
         try:
             # OpenAI SDK использует timeout из http_client, который уже установлен в 300 секунд
