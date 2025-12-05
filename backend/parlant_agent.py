@@ -4646,7 +4646,16 @@ class DocumentChangeAgent:
             logger.info(f"📄 Работа с единым объектом документа (master_doc) - используем логику локальной замены в памяти")
             # Определяем, нужно ли строго ограничивать поиск указанным параграфом
             # Если в описании явно указан пункт, поиск должен быть строго в этом параграфе
-            strict_paragraph = is_point_change and paragraph_index is not None and paragraph_index >= 0
+            # НО: для длинных текстов (>100 символов) или заголовков разрешаем проверку соседних параграфов
+            is_long_text = len(target_text) > 100
+            is_heading_text = "глава" in description.lower() or "заголовок" in description.lower()
+            strict_paragraph = is_point_change and paragraph_index is not None and paragraph_index >= 0 and not (is_long_text or is_heading_text)
+            
+            if is_long_text:
+                logger.info(f"📏 Обнаружен длинный текст ({len(target_text)} символов) - разрешена проверка соседних параграфов")
+            if is_heading_text:
+                logger.info(f"📌 Обнаружен заголовок в описании - разрешена проверка соседних параграфов")
+            
             # Используем логику локальной замены напрямую на master_doc, без сохранения файла
             local_replaced_first = self._replace_text_in_document_object(
                 master_doc, target_text, new_text, paragraph_index, strict_paragraph=strict_paragraph
@@ -9255,6 +9264,38 @@ class DocumentChangeAgent:
                 # 1. Прямое сравнение
                 text_found = old_text in para_full_text
                 
+                # 1.5. Для длинных текстов (>100 символов) также проверяем частичное совпадение
+                # (текст может быть разбит на несколько параграфов)
+                partial_match = False
+                if not text_found and len(old_text) > 100:
+                    # Пробуем найти первые 50 символов текста
+                    first_part = old_text[:50].strip()
+                    if first_part in para_full_text:
+                        logger.info(f"🔍 Частичное совпадение найдено в параграфе {actual_para_idx}: первые 50 символов текста присутствуют")
+                        partial_match = True
+                        # Проверяем соседние параграфы для полного текста
+                        if paragraph_index is not None and paragraph_index >= 0:
+                            # Проверяем следующие параграфы
+                            for next_idx in range(paragraph_index, min(len(doc.paragraphs), paragraph_index + 5)):
+                                next_para = doc.paragraphs[next_idx]
+                                combined_text = para_full_text + " " + next_para.text
+                                if old_text in combined_text or old_text in " ".join(combined_text.split()):
+                                    logger.info(f"✅ Полный текст найден в объединенных параграфах {paragraph_index} и {next_idx}")
+                                    text_found = True
+                                    # Заменяем в первом параграфе, где начинается текст
+                                    if old_text in combined_text:
+                                        new_combined = combined_text.replace(old_text, new_text, 1)
+                                        # Разделяем обратно по параграфам (упрощенный подход)
+                                        paragraph.clear()
+                                        paragraph.add_run(new_combined[:len(para_full_text)])
+                                        if next_idx < len(doc.paragraphs):
+                                            next_para.clear()
+                                            next_para.add_run(new_combined[len(para_full_text):])
+                                        replacements_made += 1
+                                        logger.info(f"✅ Замена выполнена в объединенных параграфах {paragraph_index} и {next_idx}")
+                                        return True
+                                    break
+                
                 # 2. Если не найдено, пробуем нормализацию пробелов
                 if not text_found:
                     normalized_old = " ".join(old_text.split())
@@ -9357,10 +9398,10 @@ class DocumentChangeAgent:
                         except Exception as e:
                             logger.warning(f"Не удалось выполнить сегментную замену: {e}")
                 
-                # КРИТИЧЕСКОЕ: Если strict_paragraph=True, НЕ расширяем поиск
-                # Поиск должен быть строго в указанном параграфе согласно инструкции
+                # КРИТИЧЕСКОЕ: Если strict_paragraph=True, НЕ расширяем поиск на весь документ
+                # Но для длинных текстов или заголовков можем проверить соседние параграфы
                 if strict_paragraph and not text_found:
-                    logger.warning(f"⚠️ Строгий режим: текст не найден в указанном параграфе {paragraph_index}, поиск не расширяется")
+                    logger.warning(f"⚠️ Строгий режим: текст не найден в указанном параграфе {paragraph_index}")
                     # В строгом режиме все равно пробуем найти текст через более глубокий анализ
                     # Может быть, текст есть, но разбит на runs нестандартным образом
                     logger.info(f"🔍 Попытка глубокого анализа параграфа {paragraph_index} для поиска текста...")
@@ -9383,10 +9424,55 @@ class DocumentChangeAgent:
                                 replacements_made += 1
                                 logger.info(f"✅ Локальная замена в памяти: заменен через глубокий анализ в параграфе {paragraph_index}")
                                 return True
+                        
+                        # НОВОЕ: Для длинных текстов (>50 символов) или заголовков проверяем соседние параграфы
+                        # Это может помочь, если текст разбит на несколько параграфов
+                        if len(old_text) > 50 or "заголовок" in str(paragraph.style).lower() if paragraph.style else False:
+                            logger.info(f"🔍 Длинный текст или заголовок: проверяем соседние параграфы (в пределах 3 параграфов)...")
+                            search_range = 3  # Проверяем по 3 параграфа с каждой стороны
+                            start_idx = max(0, paragraph_index - search_range)
+                            end_idx = min(len(doc.paragraphs), paragraph_index + search_range + 1)
+                            
+                            # Собираем текст из соседних параграфов
+                            combined_neighbor_text = " ".join([
+                                doc.paragraphs[i].text 
+                                for i in range(start_idx, end_idx) 
+                                if i != paragraph_index
+                            ])
+                            
+                            # Также проверяем объединенный текст указанного и соседних параграфов
+                            combined_text_with_neighbors = paragraph.text + " " + combined_neighbor_text
+                            combined_text_normalized = " ".join(combined_text_with_neighbors.split())
+                            
+                            # Пробуем найти в объединенном тексте
+                            if old_text in combined_text_with_neighbors or old_text in combined_text_normalized:
+                                logger.info(f"✅ Текст найден в объединенном тексте параграфа {paragraph_index} и соседних параграфов")
+                                # Если нашли в объединенном тексте, заменяем в указанном параграфе
+                                # (или в том, где действительно находится текст)
+                                for check_idx in range(start_idx, end_idx):
+                                    check_para = doc.paragraphs[check_idx]
+                                    check_para_text = check_para.text
+                                    
+                                    # Проверяем различные варианты текста
+                                    if old_text in check_para_text or old_text in " ".join(check_para_text.split()):
+                                        logger.info(f"✅ Текст найден в параграфе {check_idx}, выполняем замену")
+                                        if old_text in check_para_text:
+                                            new_para_text = check_para_text.replace(old_text, new_text, 1)
+                                        else:
+                                            normalized_check = " ".join(check_para_text.split())
+                                            normalized_old = " ".join(old_text.split())
+                                            new_normalized = normalized_check.replace(normalized_old, new_text, 1)
+                                            new_para_text = new_normalized
+                                        
+                                        check_para.clear()
+                                        check_para.add_run(new_para_text)
+                                        replacements_made += 1
+                                        logger.info(f"✅ Локальная замена в памяти: заменен в параграфе {check_idx} (соседний к {paragraph_index})")
+                                        return True
                     except Exception as deep_e:
-                        logger.warning(f"⚠️ Ошибка при глубоком анализе: {deep_e}")
+                        logger.warning(f"⚠️ Ошибка при глубоком анализе: {deep_e}", exc_info=True)
                     
-                    break  # Выходим, не ищем в других параграфах
+                    break  # Выходим, не ищем в других параграфах (в строгом режиме)
             
             # Замена в таблицах (только если paragraph_index == -1 или None и не найдено в параграфах)
             should_check_tables = (
