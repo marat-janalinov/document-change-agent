@@ -209,14 +209,44 @@ class MCPClient:
             arguments["paragraph_index"] = paragraph_index
 
         # Сначала пробуем стандартную замену через MCP
-        result = await self._call_tool("search_and_replace", arguments)
-        
-        # Если стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц
-        if not self._message_is_successful(result.text):
-            logger.info(f"Стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц")
-            return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
-        
-        return True
+        try:
+            result = await self._call_tool("search_and_replace", arguments)
+            
+            # Если стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц
+            if not self._message_is_successful(result.text):
+                logger.info(f"Стандартная замена не сработала, пробуем локальную замену с поддержкой таблиц")
+                return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
+            
+            return True
+        except RuntimeError as e:
+            # Если ошибка связана с неожиданным аргументом paragraph_index,
+            # пробуем вызвать без него (для совместимости со старыми версиями MCP сервера)
+            if "paragraph_index" in str(e) and ("unexpected_keyword_argument" in str(e) or "Unexpected keyword argument" in str(e)):
+                logger.warning(f"MCP сервер не поддерживает paragraph_index, пробуем без него: {e}")
+                
+                # Убираем paragraph_index из аргументов
+                arguments_without_index = {
+                    "filename": filename,
+                    "find_text": old_text,
+                    "replace_text": new_text,
+                }
+                
+                try:
+                    result = await self._call_tool("search_and_replace", arguments_without_index)
+                    
+                    # Если стандартная замена не сработала, пробуем локальную замену
+                    if not self._message_is_successful(result.text):
+                        logger.info(f"Стандартная замена без paragraph_index не сработала, пробуем локальную замену")
+                        return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
+                    
+                    return True
+                except RuntimeError as e2:
+                    logger.warning(f"Замена без paragraph_index тоже не сработала, пробуем локальную замену: {e2}")
+                    return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
+            else:
+                # Другая ошибка - пробуем локальную замену
+                logger.warning(f"Ошибка при MCP замене, пробуем локальную замену: {e}")
+                return self._replace_text_locally_with_tables(filename, old_text, new_text, paragraph_index)
 
     async def delete_paragraph(self, filename: str, paragraph_index: int) -> bool:
         result = await self._call_tool(

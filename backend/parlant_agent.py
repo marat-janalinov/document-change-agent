@@ -1920,14 +1920,16 @@ class DocumentChangeAgent:
             Восстановленный JSON с правильной структурой
         """
         logger.info("🔧 Восстановление структуры JSON...")
+        logger.debug(f"🔍 Входной parsed (тип: {type(parsed).__name__}): {json.dumps(parsed, ensure_ascii=False, indent=2)[:500] if isinstance(parsed, (dict, list)) else str(parsed)[:500]}...")
         
         # Если parsed - список, оборачиваем в структуру
         if isinstance(parsed, list):
-            logger.info("   ✅ Найден список, оборачиваем в структуру")
+            logger.info(f"   ✅ Найден список из {len(parsed)} элементов, оборачиваем в структуру")
             return {"changes": parsed}
         
         # Если parsed - словарь, проверяем структуру
         if isinstance(parsed, dict):
+            logger.debug(f"🔍 Проверяем словарь. Ключи: {list(parsed.keys())}")
             # Проверяем наличие ключа changes
             if "changes" in parsed:
                 return parsed
@@ -3206,6 +3208,10 @@ class DocumentChangeAgent:
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("LLM не вернул корректный JSON для парсинга инструкций")
 
+        # ЛОГИРОВАНИЕ сырого ответа от LLM для диагностики
+        logger.info(f"📥 Сырой ответ от LLM (первые 1000 символов): {content[:1000]}")
+        logger.debug(f"📥 Полный сырой ответ от LLM (длина: {len(content)} символов): {content}")
+
         # Попытка очистки JSON от возможных проблем
         content_cleaned = content.strip()
         
@@ -3223,10 +3229,15 @@ class DocumentChangeAgent:
         # Попытка парсинга JSON
         try:
             parsed = json.loads(content_cleaned)
+            logger.debug(f"📋 Распарсенный JSON (после json.loads): {json.dumps(parsed, ensure_ascii=False, indent=2)[:1000]}...")
+            
             # НОВЫЙ ФУНКЦИОНАЛ: Попытка восстановления структуры JSON перед валидацией
             parsed = await self._recover_json_structure(parsed, content_cleaned, changes_text)
+            logger.debug(f"📋 JSON после восстановления структуры: {json.dumps(parsed, ensure_ascii=False, indent=2)[:1000]}...")
+            
             # НОВАЯ ВАЛИДАЦИЯ JSON
             parsed = self._validate_and_fix_json(parsed)
+            logger.info(f"📋 Финальный JSON после валидации: количество изменений = {len(parsed.get('changes', []))}")
         except (json.JSONDecodeError, ValueError) as e:
             # Логируем проблемный JSON для отладки
             error_pos = e.pos if hasattr(e, 'pos') else None
