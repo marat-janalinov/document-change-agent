@@ -29,6 +29,10 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
   const [isReplaceOpen, setIsReplaceOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<number[]>([]);
   const [currentSearchIndex, setCurrentSearchIndex] = useState<number>(-1);
+  const [searchDialogPosition, setSearchDialogPosition] = useState<{ x: number; y: number } | null>(null);
+  const [isDraggingSearch, setIsDraggingSearch] = useState(false);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const searchDialogRef = useRef<HTMLDivElement>(null);
   const [zoomLevel, setZoomLevel] = useState<number>(100);
   const editorRef = useRef<HTMLDivElement>(null);
   const originalContentRef = useRef<string>('');
@@ -350,6 +354,73 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
     setSearchQuery(query);
     // НЕ выполняем поиск при вводе - только обновляем значение поля
   };
+
+  // Обработчики для перетаскивания окна поиска
+  const handleSearchDialogMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Не начинаем перетаскивание если кликнули на интерактивный элемент
+    const target = e.target as HTMLElement;
+    if (target.closest('button, input, textarea, a, [role="button"]')) {
+      return;
+    }
+    
+    // Устанавливаем начальную позицию если её ещё нет
+    if (!searchDialogPosition && searchDialogRef.current) {
+      const rect = searchDialogRef.current.getBoundingClientRect();
+      setSearchDialogPosition({
+        x: rect.left,
+        y: rect.top,
+      });
+    }
+    
+    setIsDraggingSearch(true);
+    const currentPos = searchDialogPosition || { x: 0, y: 0 };
+    setDragStart({
+      x: e.clientX - currentPos.x,
+      y: e.clientY - currentPos.y,
+    });
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isDraggingSearch && dragStart) {
+        setSearchDialogPosition({
+          x: e.clientX - dragStart.x,
+          y: e.clientY - dragStart.y,
+        });
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingSearch(false);
+      setDragStart(null);
+    };
+
+    if (isDraggingSearch) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingSearch, dragStart]);
+
+  // Сброс позиции при закрытии диалога
+  useEffect(() => {
+    if (!isSearchOpen) {
+      setSearchDialogPosition(null);
+    } else if (!searchDialogPosition) {
+      // При первом открытии центрируем диалог (Radix UI по умолчанию центрирует, но нам нужно это для transform: none)
+      if (searchDialogRef.current) {
+        const rect = searchDialogRef.current.getBoundingClientRect();
+        setSearchDialogPosition({
+          x: window.innerWidth / 2 - rect.width / 2,
+          y: window.innerHeight / 2 - rect.height / 2,
+        });
+      }
+    }
+  }, [isSearchOpen, searchDialogPosition]);
 
   // Выполнение поиска по нажатию кнопки "Найти"
   const handleSearch = () => {
@@ -762,8 +833,25 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
                   <Search className="h-4 w-4" />
                 </Button>
               </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
+              <DialogContent
+                ref={searchDialogRef}
+                style={
+                  searchDialogPosition
+                    ? {
+                        position: 'fixed',
+                        left: `${searchDialogPosition.x}px`,
+                        top: `${searchDialogPosition.y}px`,
+                        transform: 'none',
+                        margin: 0,
+                      }
+                    : undefined
+                }
+                className={searchDialogPosition ? 'cursor-move' : ''}
+              >
+                <DialogHeader
+                  onMouseDown={handleSearchDialogMouseDown}
+                  className="cursor-move select-none"
+                >
                   <DialogTitle>Поиск в документе</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4">
