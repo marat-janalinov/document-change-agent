@@ -4772,48 +4772,47 @@ class DocumentChangeAgent:
                         paragraph_index=paragraph_index
                     )
                 
-                logger.info(f"📊 Результат MCP replace_text: {mcp_replaced} (параграф {paragraph_index})")
-                
-                if mcp_replaced:
-                    logger.info(f"✅ Замена выполнена через MCP replace_text")
-                    # Перезагружаем документ и проверяем результат
-                    try:
-                        verify_doc = Document(filename)
-                        verify_success = False
-                        
-                        if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(verify_doc.paragraphs):
-                            verify_para_text = verify_doc.paragraphs[paragraph_index].text
-                            # Проверяем: новый текст присутствует ИЛИ старый текст отсутствует
-                            if new_text in verify_para_text or target_text not in verify_para_text:
-                                replaced = True
-                                verify_success = True
-                                logger.info(f"✅ Замена подтверждена после MCP replace_text в параграфе {paragraph_index}")
-                            else:
-                                logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена в параграфе {paragraph_index}")
-                                logger.info(f"   Параграф {paragraph_index}: старый текст найден={target_text[:50] in verify_para_text}, новый текст найден={new_text[:50] in verify_para_text}")
-                        else:
-                            # Проверяем по всему документу
-                            all_text = "\n".join([p.text for p in verify_doc.paragraphs])
-                            old_found = target_text in all_text
-                            new_found = new_text in all_text
+                    logger.info(f"📊 Результат MCP replace_text: {mcp_replaced} (параграф {paragraph_index})")
+                    
+                    if mcp_replaced:
+                        logger.info(f"✅ MCP replace_text вернул успех")
+                        # КРИТИЧЕСКОЕ: После MCP replace_text ВСЕГДА проверяем результат
+                        # MCP может вернуть успех, но не сохранить файл!
+                        try:
+                            verify_doc = Document(filename)
+                            verify_success = False
                             
-                            if new_found or not old_found:
-                                replaced = True
-                                verify_success = True
-                                logger.info(f"✅ Замена подтверждена после MCP replace_text (по всему документу)")
+                            if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(verify_doc.paragraphs):
+                                verify_para_text = verify_doc.paragraphs[paragraph_index].text
+                                # Проверяем: новый текст присутствует ИЛИ старый текст отсутствует
+                                if new_text in verify_para_text or target_text not in verify_para_text:
+                                    replaced = True
+                                    verify_success = True
+                                    logger.info(f"✅ Замена подтверждена после MCP replace_text в параграфе {paragraph_index}")
+                                else:
+                                    logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена в параграфе {paragraph_index}")
+                                    logger.info(f"   Параграф {paragraph_index}: старый текст найден={target_text[:50] in verify_para_text}, новый текст найден={new_text[:50] in verify_para_text}")
                             else:
-                                logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена (старый текст найден, новый отсутствует)")
-                        
-                        # Если верификация не прошла, пробуем локальную замену через MCP клиент (которая использует улучшенную логику)
-                        if not verify_success:
-                            logger.info(f"🔄 MCP вернул успех, но верификация не прошла, пробуем локальную замену через улучшенный метод")
-                            # Используем метод _replace_text_locally_with_tables из MCP клиента
-                            try:
-                                local_replaced = mcp_client._replace_text_locally_with_tables(
+                                # Проверяем по всему документу
+                                all_text = "\n".join([p.text for p in verify_doc.paragraphs])
+                                old_found = target_text in all_text
+                                new_found = new_text in all_text
+                                
+                                if new_found or not old_found:
+                                    replaced = True
+                                    verify_success = True
+                                    logger.info(f"✅ Замена подтверждена после MCP replace_text (по всему документу)")
+                                else:
+                                    logger.warning(f"⚠️ MCP replace_text вернул успех, но замена не обнаружена (старый текст найден, новый отсутствует)")
+                            
+                            # КРИТИЧЕСКОЕ: Если верификация не прошла, MCP не сохранил файл - делаем локальную замену
+                            if not verify_success:
+                                logger.warning(f"🔄 MCP вернул успех, но верификация не прошла - MCP не сохранил файл. Делаем локальную замену для гарантии сохранения")
+                                local_replaced_after = mcp_client._replace_text_locally_with_tables(
                                     filename, target_text, new_text, paragraph_index
                                 )
                                 
-                                if local_replaced:
+                                if local_replaced_after:
                                     # Повторно проверяем результат локальной замены
                                     verify_doc_after = Document(filename)
                                     verify_success_after = False
@@ -4829,18 +4828,21 @@ class DocumentChangeAgent:
                                     
                                     if verify_success_after:
                                         replaced = True
-                                        logger.info(f"✅ Локальная замена выполнена успешно и подтверждена после неудачной верификации MCP")
+                                        logger.info(f"✅ Локальная замена выполнена успешно после неудачной верификации MCP")
                                     else:
                                         logger.warning(f"⚠️ Локальная замена вернула успех, но верификация не прошла")
                                 else:
-                                    logger.warning(f"⚠️ Локальная замена также не удалась")
-                            except Exception as local_e:
-                                logger.error(f"❌ Ошибка при локальной замене после верификации: {local_e}", exc_info=True)
-                                
-                    except Exception as verify_e:
-                        logger.warning(f"⚠️ Не удалось проверить результат MCP replace_text: {verify_e}")
-                        # Если не удалось проверить, считаем успешным (на случай проблем с доступом к файлу)
-                        replaced = True
+                                    logger.warning(f"⚠️ Локальная замена также не удалась после MCP")
+                        except Exception as verify_e:
+                            logger.warning(f"⚠️ Не удалось проверить результат MCP replace_text: {verify_e}")
+                            # Если не удалось проверить, делаем локальную замену для гарантии сохранения
+                            logger.info(f"🔄 Делаем локальную замену как fallback после ошибки верификации MCP")
+                            local_replaced_fallback = mcp_client._replace_text_locally_with_tables(
+                                filename, target_text, new_text, paragraph_index
+                            )
+                            if local_replaced_fallback:
+                                replaced = True
+                                logger.info(f"✅ Локальная замена выполнена как fallback после ошибки верификации MCP")
                     else:
                         logger.warning(f"⚠️ MCP replace_text не удалась с paragraph_index={paragraph_index}")
                         # Локальная замена уже была попробована в ШАГ 1, больше ничего не делаем
