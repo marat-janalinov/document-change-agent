@@ -3896,19 +3896,20 @@ class DocumentChangeAgent:
             logger.debug(f"{change_id}: выполнение операции {operation}")
             
             if operation == "REPLACE_TEXT":
-                details = await self._handle_replace_text(filename, change, changes_file=changes_file)
+                details = await self._handle_replace_text(filename, change, changes_file=changes_file, master_doc=master_doc)
             elif operation == "REPLACE_POINT_TEXT":
-                details = await self._handle_replace_point_text(filename, change)
+                details = await self._handle_replace_point_text(filename, change, master_doc=master_doc)
             elif operation == "DELETE_PARAGRAPH":
-                details = await self._handle_delete_paragraph(filename, change)
+                details = await self._handle_delete_paragraph(filename, change, master_doc=master_doc)
             elif operation == "INSERT_PARAGRAPH":
-                details = await self._handle_insert_paragraph(filename, change)
+                details = await self._handle_insert_paragraph(filename, change, master_doc=master_doc)
             elif operation == "INSERT_SECTION":
-                details = await self._handle_insert_section(filename, change)
+                details = await self._handle_insert_section(filename, change, master_doc=master_doc)
             elif operation == "INSERT_TABLE":
-                details = await self._handle_insert_table(filename, change)
+                details = await self._handle_insert_table(filename, change, master_doc=master_doc)
             elif operation == "ADD_COMMENT":
-                details = await self._handle_add_comment(filename, change)
+                # Комментарии используют MCP, который сохраняет файл сам - передаем master_doc для совместимости
+                details = await self._handle_add_comment(filename, change, master_doc=master_doc)
             else:
                 error_msg = f"Операция {operation} не реализована"
                 logger.warning(f"{change_id}: {error_msg}")
@@ -8725,7 +8726,7 @@ class DocumentChangeAgent:
 
         return {"success": True, "paragraph_index": start}
 
-    async def _handle_insert_paragraph(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_insert_paragraph(self, filename: str, change: Dict[str, Any], master_doc: Optional[Document] = None) -> Dict[str, Any]:
         """
         Вставка нового параграфа после указанного текста.
         """
@@ -8792,7 +8793,7 @@ class DocumentChangeAgent:
 
         return {"success": True, "paragraph_index": insert_position}
 
-    async def _handle_insert_section(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_insert_section(self, filename: str, change: Dict[str, Any], master_doc: Optional[Document] = None) -> Dict[str, Any]:
         target = change.get("target", {})
         payload = change.get("payload", {})
 
@@ -8854,7 +8855,7 @@ class DocumentChangeAgent:
             "paragraphs_added": len(paragraphs) + 1,
         }
 
-    async def _handle_insert_table(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_insert_table(self, filename: str, change: Dict[str, Any], master_doc: Optional[Document] = None) -> Dict[str, Any]:
         """
         Вставка таблицы после указанного текста.
         """
@@ -8935,7 +8936,7 @@ class DocumentChangeAgent:
             "columns_count": columns,
         }
 
-    async def _handle_add_comment(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_add_comment(self, filename: str, change: Dict[str, Any], master_doc: Optional[Document] = None) -> Dict[str, Any]:
         target = change.get("target", {})
         payload = change.get("payload", {})
 
