@@ -9243,9 +9243,58 @@ class DocumentChangeAgent:
             # Замена в обычных параграфах
             for para_idx, paragraph in enumerate(target_paragraphs):
                 para_full_text = paragraph.text
+                actual_para_idx = para_idx if paragraph_index is None else paragraph_index
+                
+                # КРИТИЧЕСКОЕ: Проверяем текст несколькими способами для надежности
+                # 1. Прямое сравнение
+                text_found = old_text in para_full_text
+                
+                # 2. Если не найдено, пробуем нормализацию пробелов
+                if not text_found:
+                    normalized_old = " ".join(old_text.split())
+                    normalized_para = " ".join(para_full_text.split())
+                    text_found = normalized_old in normalized_para
+                    if text_found:
+                        logger.info(f"🔍 Текст найден после нормализации пробелов в параграфе {actual_para_idx}")
+                
+                # 3. Если не найдено, пробуем объединение runs (текст может быть разбит на runs)
+                if not text_found:
+                    try:
+                        combined_runs_text = "".join([run.text for run in paragraph.runs])
+                        text_found = old_text in combined_runs_text
+                        if text_found:
+                            logger.info(f"🔍 Текст найден в объединенных runs параграфа {actual_para_idx}")
+                            # Используем объединенный текст для дальнейшей работы
+                            para_full_text = combined_runs_text
+                    except Exception as e:
+                        logger.debug(f"Не удалось объединить runs: {e}")
+                
+                # 4. Если не найдено, пробуем нормализацию пробелов в объединенных runs
+                if not text_found:
+                    try:
+                        combined_runs_text = "".join([run.text for run in paragraph.runs])
+                        normalized_old = " ".join(old_text.split())
+                        normalized_combined = " ".join(combined_runs_text.split())
+                        text_found = normalized_old in normalized_combined
+                        if text_found:
+                            logger.info(f"🔍 Текст найден после нормализации пробелов в объединенных runs параграфа {actual_para_idx}")
+                            para_full_text = normalized_combined
+                            old_text = normalized_old  # Используем нормализованную версию для замены
+                    except Exception as e:
+                        logger.debug(f"Не удалось нормализовать объединенные runs: {e}")
+                
+                # Логируем детали для диагностики
+                if not text_found:
+                    logger.warning(f"⚠️ Текст '{old_text[:50]}...' не найден в параграфе {actual_para_idx}")
+                    logger.debug(f"   Текст параграфа (первые 200 символов): '{para_full_text[:200]}...'")
+                    logger.debug(f"   Количество runs: {len(paragraph.runs)}")
+                    if paragraph.runs:
+                        logger.debug(f"   Первый run: '{paragraph.runs[0].text[:100]}...'")
+                        if len(paragraph.runs) > 1:
+                            logger.debug(f"   Последний run: '{paragraph.runs[-1].text[:100]}...'")
                 
                 # Проверяем, содержит ли параграф искомый текст
-                if old_text in para_full_text:
+                if text_found:
                     actual_para_idx = para_idx if paragraph_index is None else paragraph_index
                     logger.info(f"Локальная замена в памяти: найден текст в параграфе {actual_para_idx}")
                     
