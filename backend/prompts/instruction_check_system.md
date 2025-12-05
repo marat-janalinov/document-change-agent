@@ -144,16 +144,22 @@
 }
 ```
 
-### Для REPLACE_TEXT:
+### Для REPLACE_TEXT (ОДНА ИНСТРУКЦИЯ):
 ```json
 {
-  "change_id": "CHG-001",
-  "operation": "REPLACE_TEXT",
-  "target": { "text": "текст_для_поиска" },
-  "payload": { "new_text": "новый_текст" },
-  "description": "описание"
+  "changes": [
+    {
+      "change_id": "CHG-001",
+      "operation": "REPLACE_TEXT",
+      "target": { "text": "текст_для_поиска" },
+      "payload": { "new_text": "новый_текст" },
+      "description": "описание"
+    }
+  ]
 }
 ```
+
+**ВАЖНО**: Даже если в документе только одна инструкция, она ДОЛЖНА быть в массиве `changes`!
 
 ### Для INSERT_PARAGRAPH:
 ```json
