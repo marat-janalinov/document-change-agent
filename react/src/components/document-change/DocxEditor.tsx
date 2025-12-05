@@ -383,6 +383,60 @@ export function DocxEditor({ filename, title, fileType = 'processed', onSave }: 
     });
   };
 
+  // Обработчики для изменения размера окна поиска
+  const handleSearchDialogResizeStart = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (searchDialogRef.current) {
+      const rect = searchDialogRef.current.getBoundingClientRect();
+      const currentSize = searchDialogSize || { width: rect.width, height: rect.height };
+      setIsResizingSearch(true);
+      setResizeStart({
+        x: e.clientX,
+        y: e.clientY,
+        width: currentSize.width,
+        height: currentSize.height,
+      });
+    }
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizingSearch && resizeStart) {
+        const deltaX = e.clientX - resizeStart.x;
+        const deltaY = e.clientY - resizeStart.y;
+        const newWidth = Math.max(300, Math.min(800, resizeStart.width + deltaX));
+        const newHeight = Math.max(200, Math.min(600, resizeStart.height + deltaY));
+        setSearchDialogSize({
+          width: newWidth,
+          height: newHeight,
+        });
+      } else if (isDraggingSearch && dragStart) {
+        setSearchDialogPosition({
+          x: e.clientX - dragStart.x,
+          y: e.clientY - dragStart.y,
+        });
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingSearch(false);
+      setIsResizingSearch(false);
+      setDragStart(null);
+      setResizeStart(null);
+    };
+
+    if (isDraggingSearch || isResizingSearch) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingSearch, isResizingSearch, dragStart, resizeStart]);
+
 
   // Сброс позиции и размера при закрытии диалога
   useEffect(() => {
