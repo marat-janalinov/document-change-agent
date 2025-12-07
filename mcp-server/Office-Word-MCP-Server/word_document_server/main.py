@@ -25,6 +25,7 @@ from word_document_server.tools import (
 )
 from word_document_server.tools.content_tools import replace_paragraph_block_below_header_tool
 from word_document_server.tools.content_tools import replace_block_between_manual_anchors_tool
+from word_document_server.tools.intelligent_replace_tools import intelligent_replace_text
 
 def get_transport_config():
     """
@@ -203,6 +204,31 @@ def register_tools():
     def search_and_replace(filename: str, find_text: str, replace_text: str):
         """Search for text and replace all occurrences."""
         return content_tools.search_and_replace(filename, find_text, replace_text)
+    
+    @mcp.tool()
+    async def replace_text(filename: str, old_text: str, new_text: str, match_case: bool = True, comment: str = None, table_index: int = None):
+        """Intelligently replace text in document with smart distribution for tables.
+        
+        If text is found in a table:
+        - Analyzes table structure (column count, types)
+        - Distributes new text across columns intelligently
+        - Optionally adds comment after table if comment parameter provided
+        
+        If text is in paragraphs:
+        - Performs standard text replacement
+        
+        Args:
+            filename: Path to the Word document
+            old_text: Text to search for
+            new_text: New text to replace with
+            match_case: Whether to match case (default: True)
+            comment: Optional comment text to add after table (if change is in table)
+            table_index: Optional specific table index to search in (if specified, only this table is searched)
+        
+        Returns:
+            Result message with operation details
+        """
+        return await intelligent_replace_text(filename, old_text, new_text, match_case, comment, table_index)
     
     # Format tools (styling, text formatting, etc.)
     @mcp.tool()

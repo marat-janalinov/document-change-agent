@@ -16,6 +16,7 @@ import certifi
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
+from docx.shared import RGBColor
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
@@ -3931,7 +3932,7 @@ class DocumentChangeAgent:
         # НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка применения изменения при неудаче
         if not details.get("success") and operation in ["REPLACE_TEXT", "DELETE_PARAGRAPH"]:
             logger.info(f"🔄 {change_id}: Первая попытка не удалась, пробуем альтернативные стратегии...")
-            retry_details = await self._retry_change_application(filename, change, operation, details)
+            retry_details = await self._retry_change_application(filename, change, operation, details, master_doc=master_doc)
             if retry_details.get("success"):
                 logger.info(f"✅ {change_id}: Успешно применено после повторной попытки")
                 details = retry_details
@@ -3962,7 +3963,8 @@ class DocumentChangeAgent:
         filename: str,
         change: Dict[str, Any],
         operation: str,
-        original_details: Dict[str, Any]
+        original_details: Dict[str, Any],
+        master_doc: Optional[Document] = None  # Единый объект документа для всех изменений
     ) -> Dict[str, Any]:
         """
         НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка применения изменения с альтернативными стратегиями.
@@ -3977,6 +3979,7 @@ class DocumentChangeAgent:
             change: Объект изменения
             operation: Тип операции
             original_details: Детали первой неудачной попытки
+            master_doc: Единый объект документа (если передан)
             
         Returns:
             Детали результата повторной попытки
@@ -3987,9 +3990,9 @@ class DocumentChangeAgent:
         logger.info(f"   Сообщение: {original_details.get('message', 'N/A')}")
         
         if operation == "REPLACE_TEXT":
-            return await self._retry_replace_text(filename, change, original_details)
+            return await self._retry_replace_text(filename, change, original_details, master_doc=master_doc)
         elif operation == "DELETE_PARAGRAPH":
-            return await self._retry_delete_paragraph(filename, change, original_details)
+            return await self._retry_delete_paragraph(filename, change, original_details, master_doc=master_doc)
         
         # Для других операций возвращаем оригинальный результат
         return original_details
@@ -4165,23 +4168,54 @@ class DocumentChangeAgent:
             for para in doc.paragraphs:
                 para_text = para.text
                 if target_text in para_text:
-                    # Заменяем напрямую в параграфе
+                    # Точное совпадение - заменяем напрямую в параграфе
                     para.clear()
                     para.add_run(para_text.replace(target_text, new_text))
                     replaced_count += 1
                     logger.info(f"   ✅ Найдено и заменено в параграфе: '{target_text}' → '{new_text}'")
+                elif target_text.lower() in para_text.lower():
+                    # Регистронезависимое совпадение - используем regex
+                    pattern = re.escape(target_text)
+                    new_para_text = re.sub(pattern, new_text, para_text, count=1, flags=re.IGNORECASE)
+                    if new_para_text != para_text:
+                        para.clear()
+                        para.add_run(new_para_text)
+                        replaced_count += 1
+                        logger.info(f"   ✅ Регистронезависимая замена в параграфе: '{target_text}' → '{new_text}'")
             
-            # Стратегия 1.2: Поиск в таблицах
+            # Стратегия 1.2: Поиск в таблицах с интеллектуальным распределением по столбцам
             if replaced_count == 0:
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            cell_text = cell.text
-                            if target_text in cell_text:
-                                # Заменяем в ячейке
-                                cell.text = cell_text.replace(target_text, new_text)
-                                replaced_count += 1
-                                logger.info(f"   ✅ Найдено и заменено в таблице: '{target_text}' → '{new_text}'")
+                for table_idx, table in enumerate(doc.tables):
+                    for row_idx, row in enumerate(table.rows):
+                        # Проверяем первую ячейку на точное совпадение (для таблиц сокращений)
+                        if len(row.cells) >= 2:
+                            first_cell_text = row.cells[0].text.strip()
+                            if first_cell_text == target_text or target_text in first_cell_text:
+                                # Интеллектуальное распределение по столбцам
+                                columns_count = len(row.cells)
+                                words = new_text.strip().split()
+                                
+                                if len(words) >= 2 and columns_count >= 2:
+                                    # Первое слово - аббревиатура (в первый столбец)
+                                    # Остальное - описание (во второй столбец)
+                                    row.cells[0].text = words[0]
+                                    row.cells[1].text = " ".join(words[1:])
+                                    replaced_count += 1
+                                    logger.info(f"   ✅ ИНТЕЛЛЕКТУАЛЬНАЯ замена в таблице {table_idx}, строка {row_idx}: '{target_text}' → ['{words[0]}', '{' '.join(words[1:])}']")
+                                else:
+                                    # Простая замена, если нет возможности распределить
+                                    row.cells[0].text = new_text
+                                    replaced_count += 1
+                                    logger.info(f"   ✅ Простая замена в таблице: '{target_text}' → '{new_text}'")
+                                break
+                        else:
+                            # Для ячеек без структуры - простая замена
+                            for cell in row.cells:
+                                cell_text = cell.text
+                                if target_text in cell_text:
+                                    cell.text = cell_text.replace(target_text, new_text)
+                                    replaced_count += 1
+                                    logger.info(f"   ✅ Найдено и заменено в таблице: '{target_text}' → '{new_text}'")
             
             if replaced_count > 0:
                 # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
@@ -4276,7 +4310,8 @@ class DocumentChangeAgent:
         self,
         filename: str,
         change: Dict[str, Any],
-        original_details: Dict[str, Any]
+        original_details: Dict[str, Any],
+        master_doc: Optional[Document] = None  # Единый объект документа для всех изменений
     ) -> Dict[str, Any]:
         """
         НОВЫЙ ФУНКЦИОНАЛ: Повторная попытка удаления параграфа с альтернативными стратегиями.
@@ -4289,7 +4324,12 @@ class DocumentChangeAgent:
         logger.info(f"🔄 Повторная попытка удаления параграфа для {change_id}")
         
         try:
-            doc = Document(filename)
+            # Используем master_doc, если передан, иначе создаем новый
+            if master_doc is not None:
+                doc = master_doc
+                logger.info(f"📄 Используем master_doc для повторной попытки удаления")
+            else:
+                doc = Document(filename)
             
             # Стратегия 1: Прямой поиск по тексту
             for idx, para in enumerate(doc.paragraphs):
@@ -4323,7 +4363,10 @@ class DocumentChangeAgent:
                         f" {punkt_num} " in para_text):
                         para_element = para._element
                         para_element.getparent().remove(para_element)
-                        doc.save(filename)
+                        # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                        if master_doc is None:
+                            doc.save(filename)
+                            logger.info(f"💾 Файл сохранен после удаления по номеру пункта (master_doc не использовался)")
                         logger.info(f"✅ {change_id}: Параграф удален по номеру пункта (индекс {idx})")
                         return {
                             "success": True,
@@ -4374,74 +4417,118 @@ class DocumentChangeAgent:
         if is_full_paragraph_replacement and not new_text:
             logger.info(f"🔍 ИНСТРУКЦИЯ 'Изложить пункт в новой редакции': новый текст будет извлечен из документа инструкций")
 
-        # ИНТЕЛЛЕКТУАЛЬНАЯ ЛОГИКА: Сначала определяем, где находится пункт - в таблице или в параграфе
+        # УНИВЕРСАЛЬНАЯ ЛОГИКА: Автоматически определяем местоположение текста (таблица или параграф)
         description_lower = description.lower()
         
-        # Проверяем, есть ли в инструкции номер пункта
-        punkt_in_instruction = False
-        punkt_number = None
-        punkt_match = re.search(r'пункт[еа]?\s+(\d+)', description, re.IGNORECASE)
-        if punkt_match:
-            punkt_number = punkt_match.group(1)
-            punkt_in_instruction = True
-            logger.info(f"📋 ОБНАРУЖЕН НОМЕР ПУНКТА в инструкции: {punkt_number}")
-        
-        # Если есть номер пункта, определяем, где он находится - в таблице или в параграфе
+        # Автоматическое определение: ищем target_text в документе и проверяем, где он находится
         is_table_change = False
-        if punkt_in_instruction:
-            logger.info(f"🔍 ОПРЕДЕЛЕНИЕ МЕСТОПОЛОЖЕНИЯ ПУНКТА {punkt_number}: проверяем таблицы и параграфы...")
+        table_location_info = None
+        specific_table_idx = None  # Индекс конкретной таблицы, если указана в инструкции
+        
+        logger.info(f"🔍 ОПРЕДЕЛЕНИЕ МЕСТОПОЛОЖЕНИЯ текста '{target_text[:30]}...'")
+        
+        try:
+            doc = Document(filename)
             
-            # Ищем номер пункта в документе
-            punkt_patterns = [f"{punkt_number}.", f"{punkt_number})", f"{punkt_number}."]
-            punkt_location = None  # "table" или "paragraph" или None
+            # ШАГ 1: Проверяем, указана ли конкретная таблица в описании инструкции
+            # Ищем паттерны типа: "таблица «Название»", "таблице «Название»", "таблицу «Название»"
+            table_name_match = re.search(r'таблиц[еуыа]?\s*[«"\'](.*?)[»"\']', description, re.IGNORECASE)
             
-            try:
-                doc = Document(filename)
+            if table_name_match:
+                specified_table_name = table_name_match.group(1).strip()
+                logger.info(f"📋 В ИНСТРУКЦИИ УКАЗАНА КОНКРЕТНАЯ ТАБЛИЦА: «{specified_table_name}»")
                 
-                # Сначала проверяем таблицы - ищем номер пункта в первой ячейке строк
-                for table_idx, table in enumerate(doc.tables):
-                    for row_idx, row in enumerate(table.rows):
-                        if len(row.cells) > 0:
-                            first_cell_text = row.cells[0].text.strip()
-                            # Проверяем, начинается ли первая ячейка с номера пункта
-                            for pattern in punkt_patterns:
-                                if first_cell_text.startswith(pattern) or first_cell_text == punkt_number:
-                                    punkt_location = "table"
-                                    logger.info(f"   ✅ Пункт {punkt_number} найден в ТАБЛИЦЕ {table_idx}, строка {row_idx}")
-                                    is_table_change = True
+                # Ищем таблицу по заголовку (параграф перед таблицей)
+                # Строим карту: параграф -> следующая таблица
+                body_elements = list(doc.element.body)
+                
+                for i, element in enumerate(body_elements):
+                    # Если это параграф, проверяем содержит ли он название таблицы
+                    from docx.oxml.text.paragraph import CT_P
+                    from docx.oxml.table import CT_Tbl
+                    
+                    if isinstance(element, CT_P):
+                        para_text = element.text if hasattr(element, 'text') else ''
+                        # Получаем текст из параграфа
+                        para_text = ''.join(node.text or '' for node in element.iter() if hasattr(node, 'text') and node.text)
+                        
+                        # Проверяем, содержит ли параграф название таблицы
+                        if specified_table_name.lower() in para_text.lower():
+                            logger.info(f"   ✅ Найден заголовок таблицы: '{para_text[:80]}...'")
+                            
+                            # Ищем следующую таблицу после этого параграфа
+                            for j in range(i + 1, len(body_elements)):
+                                if isinstance(body_elements[j], CT_Tbl):
+                                    # Находим индекс этой таблицы среди всех таблиц документа
+                                    table_count = 0
+                                    for k in range(j + 1):
+                                        if isinstance(body_elements[k], CT_Tbl):
+                                            table_count += 1
+                                    specific_table_idx = table_count - 1
+                                    logger.info(f"   ✅ Найдена таблица «{specified_table_name}» с индексом {specific_table_idx}")
                                     break
-                            if punkt_location == "table":
-                                break
-                    if punkt_location == "table":
-                        break
-                
-                # Если не нашли в таблицах, проверяем параграфы
-                if punkt_location != "table":
-                    for para_idx, para in enumerate(doc.paragraphs):
-                        para_text = para.text.strip()
-                        # Проверяем, начинается ли параграф с номера пункта
-                        for pattern in punkt_patterns:
-                            if para_text.startswith(pattern) or para_text == punkt_number:
-                                punkt_location = "paragraph"
-                                logger.info(f"   ✅ Пункт {punkt_number} найден в ПАРАГРАФЕ {para_idx}")
-                                break
-                        if punkt_location == "paragraph":
                             break
                 
-                if punkt_location:
-                    logger.info(f"📍 МЕСТОПОЛОЖЕНИЕ ПУНКТА {punkt_number}: {punkt_location.upper()}")
+                if specific_table_idx is None:
+                    logger.warning(f"   ⚠️ Таблица «{specified_table_name}» не найдена по заголовку, ищем по содержимому...")
+            
+            # ШАГ 2: Ищем текст в таблицах
+            # Если указана конкретная таблица - ищем только в ней
+            # Если не указана - ищем во всех таблицах
+            
+            tables_to_search = []
+            if specific_table_idx is not None:
+                if specific_table_idx < len(doc.tables):
+                    tables_to_search = [(specific_table_idx, doc.tables[specific_table_idx])]
+                    logger.info(f"   🎯 Поиск ТОЛЬКО в указанной таблице {specific_table_idx}")
+            else:
+                tables_to_search = list(enumerate(doc.tables))
+                logger.info(f"   🔍 Поиск во ВСЕХ таблицах ({len(doc.tables)} шт.)")
+            
+            # Сначала ищем точное совпадение в первой ячейке (для таблиц сокращений)
+            for table_idx, table in tables_to_search:
+                for row_idx, row in enumerate(table.rows):
+                    if len(row.cells) > 0:
+                        first_cell_text = row.cells[0].text.strip()
+                        # Точное совпадение в первой ячейке
+                        if first_cell_text == target_text.strip():
+                            is_table_change = True
+                            table_location_info = {"table_idx": table_idx, "row_idx": row_idx, "match_type": "exact_first_cell", "specific_table": specific_table_idx is not None}
+                            logger.info(f"   ✅ Текст '{target_text}' найден в ТАБЛИЦЕ {table_idx}, строка {row_idx} (точное совпадение в первой ячейке)")
+                            break
+                if is_table_change:
+                    break
+            
+            # Если не нашли точное совпадение, ищем как подстроку в любой ячейке
+            if not is_table_change:
+                for table_idx, table in tables_to_search:
+                    for row_idx, row in enumerate(table.rows):
+                        for col_idx, cell in enumerate(row.cells):
+                            if target_text.strip() in cell.text:
+                                is_table_change = True
+                                table_location_info = {"table_idx": table_idx, "row_idx": row_idx, "col_idx": col_idx, "match_type": "substring", "specific_table": specific_table_idx is not None}
+                                logger.info(f"   ✅ Текст '{target_text}' найден в ТАБЛИЦЕ {table_idx}, строка {row_idx}, ячейка {col_idx}")
+                                break
+                        if is_table_change:
+                            break
+                    if is_table_change:
+                        break
+            
+            if is_table_change:
+                if specific_table_idx is not None:
+                    logger.info(f"📍 МЕСТОПОЛОЖЕНИЕ: УКАЗАННАЯ ТАБЛИЦА {specific_table_idx}")
                 else:
-                    logger.warning(f"⚠️ Пункт {punkt_number} не найден ни в таблицах, ни в параграфах")
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка при определении местоположения пункта: {e}")
-                # Fallback: используем стандартную логику
-                is_table_change = "таблице" in description_lower
-        else:
-            # Если номера пункта нет, используем стандартную проверку
-            is_table_change = "таблице" in description_lower
+                    logger.info(f"📍 МЕСТОПОЛОЖЕНИЕ: ТАБЛИЦА (автоопределение)")
+            else:
+                logger.info(f"📍 МЕСТОПОЛОЖЕНИЕ: ПАРАГРАФ или НЕ НАЙДЕН")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка при определении местоположения: {e}")
+            import traceback
+            logger.warning(traceback.format_exc())
+            is_table_change = False
         
-        logger.info(f"🔍 ПРОВЕРКА ТАБЛИЦЫ: is_table_change={is_table_change}, description='{description[:50]}...'")
+        logger.info(f"🔍 РЕЗУЛЬТАТ ОПРЕДЕЛЕНИЯ: is_table_change={is_table_change}, specific_table={specific_table_idx}")
         
         # Для инструкций "Изложить пункт X в новой редакции" используем специальную обработку
         if is_full_paragraph_replacement:
@@ -4463,12 +4550,119 @@ class DocumentChangeAgent:
             logger.info("🧠 ОБНАРУЖЕНО ИЗМЕНЕНИЕ В ТАБЛИЦЕ - запуск интеллектуальной замены")
             logger.info(f"   Target: '{target_text}', New: '{new_text}'")
             
+            # КРИТИЧЕСКОЕ: Применяем изменения НАПРЯМУЮ к master_doc, а не через MCP!
+            # MCP сохраняет файл напрямую, но потом master_doc.save() перезаписывает эти изменения
+            # Поэтому для таблиц используем локальную логику с master_doc
+            
             try:
-                # Интеллектуальная замена в таблице с анализом структуры
+                # Используем master_doc напрямую для изменений в таблицах
+                doc_to_modify = master_doc if master_doc is not None else Document(filename)
+                
+                # Определяем таблицы для поиска
+                tables_to_search = []
+                if specific_table_idx is not None and specific_table_idx < len(doc_to_modify.tables):
+                    tables_to_search = [(specific_table_idx, doc_to_modify.tables[specific_table_idx])]
+                    logger.info(f"🎯 Интеллектуальная замена ТОЛЬКО в указанной таблице {specific_table_idx}")
+                else:
+                    tables_to_search = list(enumerate(doc_to_modify.tables))
+                    logger.info(f"🔍 Интеллектуальная замена во ВСЕХ таблицах ({len(doc_to_modify.tables)} шт.)")
+                
+                replaced_in_table = False
+                replaced_table_idx = None
+                comment_text = f" [Изменено: {target_text} → {new_text[:30]}{'...' if len(new_text) > 30 else ''}]"
+                
+                for table_idx, table in tables_to_search:
+                    for row_idx, row in enumerate(table.rows):
+                        # СЦЕНАРИЙ 1: Таблица сокращений - проверяем первую ячейку
+                        if len(row.cells) >= 2:
+                            first_cell_text = row.cells[0].text.strip()
+                            # Проверяем точное совпадение в первой ячейке (для таблиц сокращений)
+                            if first_cell_text == target_text.strip():
+                                # Интеллектуальное распределение по столбцам
+                                columns_count = len(row.cells)
+                                words = new_text.strip().split()
+                                
+                                if len(words) >= 2 and columns_count >= 2:
+                                    # Первое слово - аббревиатура (в первый столбец)
+                                    # Остальное - описание (во второй столбец)
+                                    row.cells[0].paragraphs[0].clear()
+                                    row.cells[0].paragraphs[0].add_run(words[0])
+                                    row.cells[1].paragraphs[0].clear()
+                                    description_run = row.cells[1].paragraphs[0].add_run(" ".join(words[1:]))
+                                    # Добавляем комментарий СРАЗУ ПОСЛЕ измененного текста (в той же ячейке)
+                                    comment_run = row.cells[1].paragraphs[0].add_run(comment_text)
+                                    comment_run.italic = True
+                                    comment_run.font.color.rgb = RGBColor(0, 0, 255)  # Синий цвет
+                                    replaced_in_table = True
+                                    replaced_table_idx = table_idx
+                                    logger.info(f"   ✅ ИНТЕЛЛЕКТУАЛЬНАЯ замена в таблице {table_idx}, строка {row_idx}: '{target_text}' → ['{words[0]}', '{' '.join(words[1:])}'] + комментарий")
+                                else:
+                                    # Простая замена в первой ячейке
+                                    row.cells[0].paragraphs[0].clear()
+                                    row.cells[0].paragraphs[0].add_run(new_text)
+                                    # Добавляем комментарий СРАЗУ ПОСЛЕ измененного текста
+                                    comment_run = row.cells[0].paragraphs[0].add_run(comment_text)
+                                    comment_run.italic = True
+                                    comment_run.font.color.rgb = RGBColor(0, 0, 255)
+                                    replaced_in_table = True
+                                    replaced_table_idx = table_idx
+                                    logger.info(f"   ✅ Простая замена в таблице {table_idx}, строка {row_idx}: '{target_text}' → '{new_text}' + комментарий")
+                                break
+                        
+                        # СЦЕНАРИЙ 2: Поиск текста в ЛЮБОЙ ячейке строки (для обычных таблиц)
+                        if not replaced_in_table:
+                            for cell_idx, cell in enumerate(row.cells):
+                                cell_text = cell.text
+                                if target_text.strip() in cell_text:
+                                    # Заменяем текст в этой ячейке
+                                    for para in cell.paragraphs:
+                                        para_text = para.text
+                                        if target_text.strip() in para_text:
+                                            # Заменяем текст в параграфе
+                                            new_para_text = para_text.replace(target_text.strip(), new_text.strip())
+                                            para.clear()
+                                            para.add_run(new_para_text)
+                                            # Добавляем комментарий СРАЗУ ПОСЛЕ измененного текста
+                                            comment_run = para.add_run(comment_text)
+                                            comment_run.italic = True
+                                            comment_run.font.color.rgb = RGBColor(0, 0, 255)
+                                            replaced_in_table = True
+                                            replaced_table_idx = table_idx
+                                            logger.info(f"   ✅ Замена в таблице {table_idx}, строка {row_idx}, ячейка {cell_idx}: '{target_text}' → '{new_text}' + комментарий")
+                                            break
+                                    if replaced_in_table:
+                                        break
+                        if replaced_in_table:
+                            break
+                    if replaced_in_table:
+                        break
+                
+                if replaced_in_table:
+                    # НЕ сохраняем файл здесь - это сделает master_doc.save() в конце
+                    if master_doc is None:
+                        doc_to_modify.save(filename)
+                        logger.info(f"💾 Файл сохранен (master_doc не использовался)")
+                    
+                    logger.info(f"✅ Интеллектуальная замена в таблице успешна (локально, через master_doc)")
+                    return {
+                        "success": True,
+                        "message": f"Текст '{target_text}' заменен на '{new_text}' в таблице с интеллектуальным распределением по столбцам. Комментарий добавлен сразу после изменения.",
+                        "matches_found": 0,
+                        "replacements_made": 1,
+                        "method": "intelligent_replace_with_comment"
+                    }
+                else:
+                    logger.info(f"⚠️ Текст '{target_text}' не найден в таблицах, используем fallback")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при локальной интеллектуальной замене в таблице: {e}")
+            
+            try:
+                # Fallback на локальную интеллектуальную замену
                 result = await self._intelligent_table_replacement(filename, target_text, new_text, description)
                 logger.info(f"🧠 РЕЗУЛЬТАТ интеллектуальной замены: {result.get('success', False)}")
                 if result["success"]:
                     logger.info(f"✅ Интеллектуальная замена в таблице успешна")
+                    # Комментарий будет добавлен автоматически через новую функцию replace_text
                     return result
                 else:
                     logger.warning("⚠️ Интеллектуальная замена не удалась, используем стандартную логику")
@@ -4674,7 +4868,10 @@ class DocumentChangeAgent:
             if master_doc is not None:
                 # Проверяем результат в master_doc напрямую
                 if paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(master_doc.paragraphs):
-                    verify_para_text = master_doc.paragraphs[paragraph_index].text
+                    verify_para = master_doc.paragraphs[paragraph_index]
+                    verify_para_text = verify_para.text
+                    # НОВОЕ: Определяем, является ли параграф заголовком
+                    is_heading = self._is_heading(verify_para)
                     if new_text in verify_para_text or target_text not in verify_para_text:
                         replaced = True
                         logger.info(f"✅ Локальная замена в памяти выполнена успешно и подтверждена в параграфе {paragraph_index}")
@@ -4724,15 +4921,22 @@ class DocumentChangeAgent:
             para = doc.paragraphs[paragraph_index]
         
         # Инициализируем переменные для специальной обработки заголовков (до их использования)
+        # ВАЖНО: Инициализируем всегда, чтобы избежать ошибки "cannot access local variable"
         is_heading = False
         is_heading_by_description = False
-        description_lower = description.lower() if not replaced else ""
         
-        # НОВЫЙ ФУНКЦИОНАЛ: Специальная обработка для заголовков/разделов (только если локальная не сработала)
-        if not replaced:
+        description_lower = description.lower()
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Определение заголовка по стилю параграфа
+        if not replaced and doc is not None and para is not None:
             is_heading = self._is_heading(para)
-            # Проверяем описание на наличие явных указаний на замену заголовка/наименования раздела
-            # Важно: применяем специальную обработку только если явно указано, что нужно изменить заголовок/наименование
+        elif replaced and master_doc is not None and paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(master_doc.paragraphs):
+            # Если замена уже выполнена, проверяем заголовок в master_doc
+            verify_para = master_doc.paragraphs[paragraph_index]
+            is_heading = self._is_heading(verify_para)
+        
+        # Инициализируем description_lower
+        if not description_lower:
             description_lower = description.lower()
         
         # Проверяем явные указания на замену заголовка/наименования
@@ -4744,6 +4948,8 @@ class DocumentChangeAgent:
             "изменить наименование", "заменить наименование",  # Изменение наименования
             "изменить название", "заменить название",  # Изменение названия
             "изложить заголовок", "изложить наименование",  # Изложение заголовка/наименования
+            "глава",  # Если упоминается "глава" в контексте изменения
+            "в главе",  # Может указывать на изменение заголовка, если target_text совпадает с заголовком
         ]
         
         # Проверяем, есть ли явное указание на заголовок/наименование
@@ -4756,17 +4962,38 @@ class DocumentChangeAgent:
         has_internal_replacement_indication = any(
             exclusion in description_lower 
             for exclusion in [
-                "в главе", "в разделе", "в пункте",  # Эти фразы указывают на замену внутри, а не заголовка
                 "текст в главе", "текст в разделе", "текст в",  # Явно не заголовок
                 "строку в главе", "строку в разделе", "строку в",  # Замена строки внутри
                 "слова в главе", "слова в разделе", "слова в",  # Замена слов внутри
             ]
         )
         
-        # Специальная обработка применяется только если:
-        # 1. Есть явное указание на заголовок/наименование И
-        # 2. НЕТ указания на замену внутри главы/раздела
-        is_heading_by_description = has_explicit_heading_indication and not has_internal_replacement_indication
+        # НОВОЕ: Также проверяем, совпадает ли target_text с текстом заголовка параграфа
+        # Это поможет определить заголовок, даже если в описании нет явного указания
+        is_heading_by_target_text = False
+        if para is not None and target_text:
+            para_text_normalized = " ".join(para.text.strip().split())
+            target_text_normalized = " ".join(target_text.split())
+            # Проверяем, совпадает ли target_text с текстом параграфа (полностью или частично)
+            if target_text_normalized in para_text_normalized or para_text_normalized in target_text_normalized:
+                # Если параграф имеет стиль заголовка, то это точно заголовок
+                if is_heading:
+                    is_heading_by_target_text = True
+                # Или если описание содержит "глава" или "раздел" и target_text похож на заголовок
+                elif ("глава" in description_lower or "раздел" in description_lower) and len(target_text) < 200:
+                    # Проверяем, начинается ли target_text с номера или "Глава X"/"Раздел X" (как обычно в заголовках)
+                    if re.match(r'^(Глава|ГЛАВА|Раздел|РАЗДЕЛ)?\s*\d+\.?\s+[А-ЯЁA-Z]', target_text, re.IGNORECASE):
+                        is_heading_by_target_text = True
+                        logger.info(f"   🎯 target_text определён как заголовок по паттерну")
+        
+        # Специальная обработка применяется если:
+        # 1. Параграф имеет стиль заголовка (is_heading), ИЛИ
+        # 2. Есть явное указание на заголовок/наименование в описании И нет указания на замену внутри, ИЛИ
+        # 3. target_text совпадает с текстом заголовка и есть признаки заголовка
+        is_heading_by_description = (
+            (has_explicit_heading_indication and not has_internal_replacement_indication) or
+            is_heading_by_target_text
+        )
         
         if is_heading or is_heading_by_description:
             logger.info(f"📌 Обнаружен заголовок/раздел (стиль: {para.style.name if para.style else 'N/A'}, по описанию: {is_heading_by_description}), используем специальную обработку")
@@ -4774,22 +5001,49 @@ class DocumentChangeAgent:
             # Это сохранит стиль заголовка, но пересоздаст runs
             try:
                 para_text = para.text
-                # Проверяем точное совпадение или совпадение без учета регистра
-                text_found = target_text in para_text
-                if not text_found and match_case:
-                    # Пробуем без учета регистра
-                    text_found = target_text.lower() in para_text.lower()
+                # Нормализуем для сравнения (специальные символы: неразрывные пробелы, тире, кавычки)
+                normalized_para_text = self._normalize_special_chars(para_text)
+                normalized_target = self._normalize_special_chars(target_text)
                 
-                if text_found:
+                # Проверяем различные типы совпадений
+                exact_match = target_text in para_text
+                normalized_match = False
+                case_insensitive_match = False
+                
+                if not exact_match:
+                    # Пробуем с нормализацией специальных символов
+                    normalized_match = normalized_target in normalized_para_text
+                    if normalized_match:
+                        logger.info(f"   ✅ Текст найден через нормализацию специальных символов")
+                
+                if not exact_match and not normalized_match:
+                    # Пробуем без учета регистра (для заголовков типа "Глава 1. ОПРЕДЕЛЕНИЯ" vs "Глава 1. Определения")
+                    case_insensitive_match = target_text.lower() in para_text.lower()
+                    if case_insensitive_match:
+                        logger.info(f"   ✅ Текст найден через регистронезависимый поиск")
+                    elif normalized_target.lower() in normalized_para_text.lower():
+                        # Нормализация + регистронезависимый
+                        case_insensitive_match = True
+                        normalized_match = True  # Используем нормализованную замену
+                        logger.info(f"   ✅ Текст найден через нормализацию + регистронезависимый поиск")
+                
+                if exact_match or normalized_match or case_insensitive_match:
                     # Сохраняем стиль заголовка
                     heading_style = para.style
-                    # Выполняем замену (с учетом регистра или без)
-                    if target_text in para_text:
+                    # Выполняем замену с учетом типа совпадения
+                    if exact_match:
+                        # Прямая замена
                         new_para_text = para_text.replace(target_text, new_text, 1)
-                    else:
-                        # Замена без учета регистра
+                        logger.info(f"   🔄 Прямая замена: '{target_text[:50]}...' → '{new_text[:50]}...'")
+                    elif case_insensitive_match:
+                        # Замена без учета регистра через regex
                         pattern = re.escape(target_text)
                         new_para_text = re.sub(pattern, new_text, para_text, count=1, flags=re.IGNORECASE)
+                        logger.info(f"   🔄 Регистронезависимая замена: '{target_text[:50]}...' → '{new_text[:50]}...'")
+                    elif normalized_match:
+                        # Замена через нормализованный текст
+                        new_para_text = normalized_para_text.replace(normalized_target, new_text, 1)
+                        logger.info(f"   🔄 Замена через нормализацию: '{normalized_target[:50]}...' → '{new_text[:50]}...'")
                     
                     para.text = new_para_text
                     # Восстанавливаем стиль заголовка (на случай, если он был потерян)
@@ -4808,6 +5062,7 @@ class DocumentChangeAgent:
                         
                         # НОВЫЙ ФУНКЦИОНАЛ: Синхронизация с содержанием (оглавлением)
                         # Передаем master_doc для синхронизации, чтобы не создавать новый Document()
+                        logger.info(f"📋 Запуск синхронизации заголовка с содержанием...")
                         await self._sync_heading_with_table_of_contents(
                             filename, target_text, new_text, is_heading_change=True, master_doc=master_doc
                         )
@@ -4876,6 +5131,49 @@ class DocumentChangeAgent:
                             replaced = True
                     except Exception as e:
                         logger.warning(f"⚠️ Ошибка при замене с нормализацией: {e}")
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Попытка с нормализацией специальных символов (тире, неразрывные пробелы, кавычки)
+        if not replaced and para is not None:
+            logger.info(f"🔍 Попытка замены с нормализацией специальных символов")
+            try:
+                para_text = para.text
+                normalized_target = self._normalize_special_chars(target_text)
+                normalized_para_text = self._normalize_special_chars(para_text)
+                
+                if normalized_target in normalized_para_text:
+                    logger.info(f"   ✅ Нормализованный текст найден в параграфе")
+                    # Находим позицию в нормализованном тексте
+                    norm_start = normalized_para_text.find(normalized_target)
+                    norm_end = norm_start + len(normalized_target)
+                    
+                    # Строим маппинг между нормализованными и оригинальными позициями
+                    # Простой подход: заменяем весь текст параграфа
+                    # Находим оригинальный текст, который соответствует нормализованному
+                    
+                    # Попытка найти оригинальный текст по позиции
+                    # Используем простую замену через полный текст параграфа
+                    new_normalized_text = normalized_para_text.replace(normalized_target, new_text, 1)
+                    
+                    # Применяем замену напрямую к параграфу
+                    # Очищаем runs и записываем новый текст
+                    if para.runs:
+                        # Сохраняем форматирование первого run
+                        for run in para.runs:
+                            run.text = ""
+                        para.runs[0].text = new_normalized_text
+                    else:
+                        para.text = new_normalized_text
+                    
+                    # Проверяем результат
+                    if new_text in para.text:
+                        logger.info(f"✅ Замена выполнена с нормализацией специальных символов")
+                        replaced = True
+                    else:
+                        logger.warning(f"⚠️ Замена через нормализацию не подтверждена")
+                else:
+                    logger.debug(f"   Нормализованный текст не найден")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при замене с нормализацией специальных символов: {e}")
         
         # НОВЫЙ ФУНКЦИОНАЛ: Последняя попытка - прямая замена через очистку runs
         if not replaced and doc is not None and para is not None and target_text in para.text:
@@ -5200,6 +5498,23 @@ class DocumentChangeAgent:
                         logger.info(f"✅ Замена подтверждена после сохранения")
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось проверить замену после сохранения: {e}")
+        
+        # НОВЫЙ ФУНКЦИОНАЛ: Если замена успешна и это заголовок, синхронизируем с содержанием
+        # Это выполняется после всех попыток замены и проверок
+        if replaced and (is_heading or is_heading_by_description):
+            logger.info(f"📋 Обнаружен заголовок после успешной замены, запускаем синхронизацию с содержанием...")
+            # Определяем, какой параграф использовать для проверки
+            check_para = None
+            if master_doc is not None and paragraph_index is not None and paragraph_index >= 0 and paragraph_index < len(master_doc.paragraphs):
+                check_para = master_doc.paragraphs[paragraph_index]
+            elif para is not None:
+                check_para = para
+            
+            # Если параграф определен и это действительно заголовок, выполняем синхронизацию
+            if check_para is not None and (is_heading or self._is_heading(check_para)):
+                await self._sync_heading_with_table_of_contents(
+                    filename, target_text, new_text, is_heading_change=True, master_doc=master_doc
+                )
 
         if change.get("annotation", True):
             await self._add_annotation(
@@ -8396,7 +8711,12 @@ class DocumentChangeAgent:
         
         return {"success": True, "paragraph_index": start_idx}
 
-    async def _handle_delete_paragraph(self, filename: str, change: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_delete_paragraph(
+        self, 
+        filename: str, 
+        change: Dict[str, Any],
+        master_doc: Optional[Document] = None  # Единый объект документа для всех изменений
+    ) -> Dict[str, Any]:
         target = change.get("target", {})
         text_to_remove = target.get("text")
         match_case = target.get("match_case", False)
@@ -8409,7 +8729,12 @@ class DocumentChangeAgent:
                 "message": "Для DELETE_PARAGRAPH необходим target.text",
             }
 
-        doc = Document(filename)
+        # Используем master_doc, если передан, иначе создаем новый
+        if master_doc is not None:
+            doc = master_doc
+            logger.info(f"📄 Используем master_doc для удаления параграфа")
+        else:
+            doc = Document(filename)
 
         # Проверяем, является ли text_to_remove номером пункта
         paragraph_num = None
@@ -8506,7 +8831,10 @@ class DocumentChangeAgent:
             
             # Если пункт найден и удален из таблицы
             if row_deleted:
-                doc.save(filename)
+                # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                if master_doc is None:
+                    doc.save(filename)
+                    logger.info(f"💾 Файл сохранен после удаления пункта из таблицы (master_doc не использовался)")
                 
                 # Добавляем аннотацию перед таблицей
                 table_para_idx = self._find_paragraph_for_table(doc, table_found_idx)
@@ -8665,7 +8993,10 @@ class DocumentChangeAgent:
             
             # Если строка удалена из таблицы
             if row_deleted:
-                doc.save(filename)
+                # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                if master_doc is None:
+                    doc.save(filename)
+                    logger.info(f"💾 Файл сохранен после удаления строки из таблицы (master_doc не использовался)")
                 
                 # Добавляем аннотацию перед таблицей
                 table_para_idx = self._find_paragraph_for_table(doc, table_found_idx)
@@ -8764,7 +9095,10 @@ class DocumentChangeAgent:
                         removed_preview.append(next_para.text)
                         DocumentChangeAgent._delete_paragraph(next_para)
                 
-                doc.save(filename)
+                # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+                if master_doc is None:
+                    doc.save(filename)
+                    logger.info(f"💾 Файл сохранен после удаления содержимого пункта (master_doc не использовался)")
                 
                 if change.get("annotation", True) and paragraph_index > 0:
                     preview_text = " ".join(removed_preview)[:120]
@@ -8787,7 +9121,10 @@ class DocumentChangeAgent:
             removed_preview.append(para.text)
             DocumentChangeAgent._delete_paragraph(para)
 
-        doc.save(filename)
+        # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+        if master_doc is None:
+            doc.save(filename)
+            logger.info(f"💾 Файл сохранен после удаления параграфа (master_doc не использовался)")
 
         if change.get("annotation", True) and start > 0:
             preview_text = " ".join(removed_preview)[:120]
@@ -8839,7 +9176,14 @@ class DocumentChangeAgent:
             }
 
         anchor_index = matches[0].paragraph_index
-        doc = Document(filename)
+        
+        # Используем master_doc, если передан, иначе создаем новый
+        if master_doc is not None:
+            doc = master_doc
+            logger.info(f"📄 Используем master_doc для вставки параграфа")
+        else:
+            doc = Document(filename)
+        
         if anchor_index >= len(doc.paragraphs):
             return {
                 "success": False,
@@ -8849,9 +9193,13 @@ class DocumentChangeAgent:
 
         insert_after = doc.paragraphs[anchor_index]
         self._insert_paragraph_after(insert_after, new_paragraph, style)
-        doc.save(filename)
+        
+        # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+        if master_doc is None:
+            doc.save(filename)
+            logger.info(f"💾 Файл сохранен после вставки параграфа (master_doc не использовался)")
 
-        doc = Document(filename)
+        # Для определения позиции вставки используем тот же doc
         insert_position = (
             self._find_paragraph_index_by_text(doc, new_paragraph, start=anchor_index)
             or anchor_index + 1
@@ -8888,7 +9236,14 @@ class DocumentChangeAgent:
             return {"success": False, "error": "ANCHOR_NOT_FOUND"}
 
         anchor_index = matches[0].paragraph_index
-        doc = Document(filename)
+        
+        # Используем master_doc, если передан, иначе создаем новый
+        if master_doc is not None:
+            doc = master_doc
+            logger.info(f"📄 Используем master_doc для вставки раздела")
+        else:
+            doc = Document(filename)
+        
         if anchor_index >= len(doc.paragraphs):
             return {
                 "success": False,
@@ -8905,9 +9260,12 @@ class DocumentChangeAgent:
         for paragraph in paragraphs:
             current_para = self._insert_paragraph_after(current_para, paragraph)
 
-        doc.save(filename)
+        # КРИТИЧЕСКОЕ: НЕ сохраняем файл здесь, если используется master_doc
+        if master_doc is None:
+            doc.save(filename)
+            logger.info(f"💾 Файл сохранен после вставки раздела (master_doc не использовался)")
 
-        doc = Document(filename)
+        # Для определения позиции используем тот же doc
         start_index = (
             self._find_paragraph_index_by_text(
                 doc, heading_text, start=insert_index, style=heading_style
@@ -8972,7 +9330,13 @@ class DocumentChangeAgent:
             }
         
         anchor_index = matches[0].paragraph_index
-        doc = Document(filename)
+        
+        # Используем master_doc, если передан, иначе создаем новый
+        if master_doc is not None:
+            doc = master_doc
+            logger.info(f"📄 Используем master_doc для вставки таблицы")
+        else:
+            doc = Document(filename)
         
         if anchor_index >= len(doc.paragraphs):
             return {
@@ -8985,8 +9349,33 @@ class DocumentChangeAgent:
         if not columns:
             columns = max(len(row) for row in rows) if rows else 0
         
-        # Вставляем таблицу через MCP
-        success = await mcp_client.add_table(filename, rows, position=anchor_index + 1)
+        # Вставляем таблицу напрямую в master_doc, если он передан
+        if master_doc is not None:
+            # Вставляем таблицу через XML после anchor параграфа
+            anchor_para = doc.paragraphs[anchor_index]
+            
+            # Создаём таблицу
+            num_rows = len(rows)
+            num_cols = columns
+            table = doc.add_table(rows=num_rows, cols=num_cols)
+            
+            # Заполняем ячейки
+            for row_idx, row_data in enumerate(rows):
+                row_cells = table.rows[row_idx].cells
+                for col_idx, cell_value in enumerate(row_data):
+                    if col_idx < len(row_cells):
+                        row_cells[col_idx].text = str(cell_value) if cell_value else ""
+            
+            # Перемещаем таблицу после anchor параграфа
+            anchor_element = anchor_para._element
+            table_element = table._tbl
+            anchor_element.addnext(table_element)
+            
+            logger.info(f"✅ Таблица вставлена в master_doc после параграфа {anchor_index}")
+            success = True
+        else:
+            # Вставляем таблицу через MCP (fallback)
+            success = await mcp_client.add_table(filename, rows, position=anchor_index + 1)
         
         if not success:
             return {
@@ -9528,6 +9917,71 @@ class DocumentChangeAgent:
             return False
 
     @staticmethod
+    def _normalize_special_chars(text: str) -> str:
+        """
+        Нормализует специальные символы в тексте для надёжного поиска и замены.
+        
+        Заменяет:
+        - Неразрывные пробелы на обычные
+        - Различные типы тире на обычное
+        - Различные типы кавычек на обычные
+        - Специальные пробелы (en-space, em-space и т.д.)
+        
+        Args:
+            text: Исходный текст
+            
+        Returns:
+            Нормализованный текст
+        """
+        if not text:
+            return text
+            
+        # Неразрывные пробелы и специальные пробелы
+        text = text.replace('\u00A0', ' ')  # Non-breaking space
+        text = text.replace('\u2002', ' ')  # En space
+        text = text.replace('\u2003', ' ')  # Em space
+        text = text.replace('\u2009', ' ')  # Thin space
+        text = text.replace('\u200A', ' ')  # Hair space
+        text = text.replace('\u200B', '')   # Zero-width space
+        text = text.replace('\u202F', ' ')  # Narrow no-break space
+        text = text.replace('\u205F', ' ')  # Medium mathematical space
+        text = text.replace('\u3000', ' ')  # Ideographic space
+        text = text.replace('\uFEFF', '')   # BOM / Zero-width no-break space
+        
+        # Различные типы тире на обычное
+        text = text.replace('\u2010', '-')  # Hyphen
+        text = text.replace('\u2011', '-')  # Non-breaking hyphen
+        text = text.replace('\u2012', '-')  # Figure dash
+        text = text.replace('\u2013', '-')  # En dash
+        text = text.replace('\u2014', '-')  # Em dash
+        text = text.replace('\u2015', '-')  # Horizontal bar
+        text = text.replace('–', '-')       # En dash (alternate)
+        text = text.replace('—', '-')       # Em dash (alternate)
+        
+        # Различные типы кавычек
+        text = text.replace('\u00AB', '"')  # «
+        text = text.replace('\u00BB', '"')  # »
+        text = text.replace('\u201C', '"')  # "
+        text = text.replace('\u201D', '"')  # "
+        text = text.replace('\u201E', '"')  # „
+        text = text.replace('\u201F', '"')  # ‟
+        text = text.replace('\u2018', "'")  # '
+        text = text.replace('\u2019', "'")  # '
+        text = text.replace('\u201A', "'")  # ‚
+        text = text.replace('\u201B', "'")  # ‛
+        text = text.replace('«', '"')
+        text = text.replace('»', '"')
+        text = text.replace('"', '"')
+        text = text.replace('"', '"')
+        text = text.replace(''', "'")
+        text = text.replace(''', "'")
+        
+        # Нормализация множественных пробелов
+        text = ' '.join(text.split())
+        
+        return text
+
+    @staticmethod
     def _robust_replace_in_paragraph(paragraph: Paragraph, old: str, new: str) -> bool:
         """
         НОВЫЙ ФУНКЦИОНАЛ: Надежная замена текста в параграфе, работающая с текстом,
@@ -9725,21 +10179,38 @@ class DocumentChangeAgent:
     def _find_text_locally(self, filename: str, text_to_find: str, match_case: bool = True) -> List[MCPTextMatch]:
         """
         Локальный поиск текста в документе через python-docx (fallback для MCP).
+        Поддерживает нормализацию специальных символов.
         """
         matches = []
         try:
             doc = Document(filename)
+            # Нормализуем искомый текст
+            normalized_search = self._normalize_special_chars(text_to_find)
+            
             for idx, paragraph in enumerate(doc.paragraphs):
                 para_text = paragraph.text
-                if not match_case:
-                    para_text = para_text.lower()
-                    search_text = text_to_find.lower()
-                else:
-                    search_text = text_to_find
+                normalized_para = self._normalize_special_chars(para_text)
                 
-                if search_text in para_text:
+                # Подготовка для сравнения
+                if not match_case:
+                    compare_para = normalized_para.lower()
+                    compare_search = normalized_search.lower()
+                    original_compare_para = para_text.lower()
+                    original_compare_search = text_to_find.lower()
+                else:
+                    compare_para = normalized_para
+                    compare_search = normalized_search
+                    original_compare_para = para_text
+                    original_compare_search = text_to_find
+                
+                # Сначала пробуем оригинальный текст
+                if original_compare_search in original_compare_para:
                     matches.append(MCPTextMatch(paragraph_index=idx, text=paragraph.text))
-                    logger.debug(f"Найден текст '{text_to_find}' в параграфе {idx}: {paragraph.text[:100]}...")
+                    logger.debug(f"Найден текст '{text_to_find[:50]}...' в параграфе {idx}: {paragraph.text[:100]}...")
+                # Затем пробуем нормализованный текст (если не нашли оригинальный)
+                elif compare_search in compare_para:
+                    matches.append(MCPTextMatch(paragraph_index=idx, text=paragraph.text, normalized_match=True))
+                    logger.debug(f"Найден НОРМАЛИЗОВАННЫЙ текст '{text_to_find[:50]}...' в параграфе {idx}")
         except Exception as e:
             logger.error(f"Ошибка локального поиска текста: {e}")
         
@@ -9975,6 +10446,131 @@ class DocumentChangeAgent:
                     logger.info(f"   ✅ Замена выполнена в соседнем параграфе {idx}")
                     return True
         
+        # Стратегия 5: Нормализация специальных символов (тире, неразрывные пробелы, кавычки)
+        logger.info(f"   Попытка 5: замена с нормализацией специальных символов")
+        normalized_target = self._normalize_special_chars(target_text)
+        if normalized_target != target_text:
+            for para in doc.paragraphs:
+                para_text = para.text
+                normalized_para_text = self._normalize_special_chars(para_text)
+                
+                if normalized_target in normalized_para_text:
+                    logger.info(f"   🎯 Найден текст с нормализованными специальными символами")
+                    try:
+                        # Заменяем через полный текст параграфа с нормализацией
+                        new_normalized_text = normalized_para_text.replace(normalized_target, new_text, 1)
+                        
+                        # Применяем замену
+                        if para.runs:
+                            for run in para.runs:
+                                run.text = ""
+                            para.runs[0].text = new_normalized_text
+                        else:
+                            para.text = new_normalized_text
+                        
+                        if new_text in para.text:
+                            logger.info(f"   ✅ Замена выполнена с нормализацией специальных символов")
+                            return True
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Ошибка при замене с нормализацией: {e}")
+        
+        # Стратегия 6: Поиск по началу текста для длинных фраз (CHG-003 тип)
+        if len(target_text) > 50:
+            logger.info(f"   Попытка 6: поиск по началу длинного текста")
+            # Берем первые 50-60 символов или первые 5-7 слов
+            words = target_text.split()
+            search_prefix = " ".join(words[:min(7, len(words))])
+            normalized_prefix = self._normalize_special_chars(search_prefix)
+            
+            for para in doc.paragraphs:
+                para_text = para.text
+                normalized_para_text = self._normalize_special_chars(para_text)
+                
+                # Проверяем, начинается ли параграф с искомого текста
+                if normalized_para_text.startswith(normalized_prefix) or normalized_prefix in normalized_para_text[:100]:
+                    logger.info(f"   🎯 Найден параграф по началу текста")
+                    # Полная замена параграфа (если это полная замена содержимого)
+                    try:
+                        # Проверяем, насколько похож текст параграфа на target_text
+                        similarity = len(set(normalized_para_text.split()) & set(self._normalize_special_chars(target_text).split()))
+                        target_words = len(self._normalize_special_chars(target_text).split())
+                        
+                        if similarity > target_words * 0.7:  # 70% совпадение слов
+                            logger.info(f"   📊 Высокое совпадение ({similarity}/{target_words} слов), выполняем замену")
+                            if para.runs:
+                                for run in para.runs:
+                                    run.text = ""
+                                para.runs[0].text = new_text
+                            else:
+                                para.text = new_text
+                            
+                            if new_text in para.text:
+                                logger.info(f"   ✅ Замена выполнена по началу длинного текста")
+                                return True
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Ошибка при замене по началу текста: {e}")
+        
+        # Стратегия 7: Специальная обработка заголовков типа "Глава X." или "Раздел X."
+        if re.match(r'^(Глава|ГЛАВА|Раздел|РАЗДЕЛ)\s*\d+\.?\s*', target_text, re.IGNORECASE):
+            logger.info(f"   Попытка 7: специальная обработка заголовка типа 'Глава/Раздел X'")
+            normalized_target = self._normalize_special_chars(target_text)
+            
+            for idx, para in enumerate(doc.paragraphs):
+                para_text = para.text.strip()
+                normalized_para = self._normalize_special_chars(para_text)
+                
+                # Проверяем несколько условий для заголовков:
+                # 1. Полное совпадение (с нормализацией)
+                # 2. Совпадение начала (заголовок может быть частью строки)
+                # 3. Совпадение без учета регистра
+                
+                match_conditions = [
+                    normalized_target == normalized_para,  # Точное совпадение
+                    normalized_para.startswith(normalized_target),  # Начинается с target
+                    normalized_target in normalized_para,  # Содержит target
+                    normalized_target.lower() == normalized_para.lower(),  # Без регистра
+                ]
+                
+                if any(match_conditions):
+                    logger.info(f"   🎯 Найден заголовок в параграфе {idx}: '{para_text[:60]}...'")
+                    try:
+                        # Сохраняем стиль
+                        heading_style = para.style
+                        
+                        # Выполняем замену с учетом типа совпадения
+                        if target_text in para_text:
+                            # Точное совпадение
+                            new_para_text = para_text.replace(target_text, new_text, 1)
+                            logger.info(f"      Прямая замена")
+                        elif normalized_target in normalized_para:
+                            # Замена через нормализованный текст
+                            new_para_text = normalized_para.replace(normalized_target, new_text, 1)
+                            logger.info(f"      Замена через нормализацию")
+                        else:
+                            # Регистронезависимая замена через regex
+                            pattern = re.escape(target_text)
+                            new_para_text = re.sub(pattern, new_text, para_text, count=1, flags=re.IGNORECASE)
+                            logger.info(f"      Регистронезависимая замена")
+                        
+                        # Очищаем runs и записываем новый текст
+                        if para.runs:
+                            for run in para.runs:
+                                run.text = ""
+                            para.runs[0].text = new_para_text
+                        else:
+                            para.text = new_para_text
+                        
+                        # Восстанавливаем стиль
+                        if heading_style:
+                            para.style = heading_style
+                        
+                        # Проверяем результат
+                        if new_text in para.text:
+                            logger.info(f"   ✅ Замена заголовка выполнена успешно")
+                            return True
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Ошибка при замене заголовка: {e}")
+        
         logger.info(f"   ❌ Расширенная попытка замены не дала результатов")
         return False
 
@@ -10009,26 +10605,121 @@ class DocumentChangeAgent:
                 doc = Document(filename)
             synced_count = 0
             
-            # Ищем текст в таблицах (содержание обычно хранится в таблицах)
+            # Нормализуем тексты для сравнения (определяем в начале функции)
+            old_heading_normalized = " ".join(old_heading_text.split())
+            new_heading_normalized = " ".join(new_heading_text.split())
+            
+            # НОВОЕ: Определяем, есть ли в документе содержание (оглавление)
+            # Содержание обычно находится в таблице и содержит номера страниц
+            has_table_of_contents = False
+            toc_table_indices = []
+            
+            # Проверяем все таблицы на признаки содержания
             for table_idx, table in enumerate(doc.tables):
+                is_toc_table = False
+                # Проверяем первые несколько строк таблицы
+                rows_to_check = min(3, len(table.rows))
+                for row_idx in range(rows_to_check):
+                    if row_idx >= len(table.rows):
+                        break
+                    row = table.rows[row_idx]
+                    # Объединяем текст всех ячеек строки
+                    row_text = " ".join([cell.text.strip() for cell in row.cells])
+                    # Проверяем признаки содержания:
+                    # 1. Наличие номеров страниц в конце (формат "..... 5" или "  10")
+                    # 2. Наличие нумерованных пунктов (формат "1. Название")
+                    # 3. Ключевые слова, указывающие на содержание
+                    toc_patterns = [
+                        r'\d+\s*$',  # Номер страницы в конце
+                        r'^\d+\.\s+',  # Номер раздела в начале
+                        r'[. ]{3,}\d+$',  # Точки и номер страницы
+                    ]
+                    has_toc_pattern = any(re.search(pattern, row_text) for pattern in toc_patterns)
+                    has_heading_numbers = bool(re.search(r'^\d+\.?\s+[А-ЯЁ]', row_text, re.IGNORECASE))
+                    
+                    if has_toc_pattern or has_heading_numbers:
+                        is_toc_table = True
+                        break
+                
+                if is_toc_table:
+                    has_table_of_contents = True
+                    toc_table_indices.append(table_idx)
+                    logger.info(f"   📋 Обнаружена таблица содержания: таблица {table_idx}")
+            
+            # Ищем текст в таблицах содержания (если обнаружено содержание)
+            # Если содержание не обнаружено, проверяем все таблицы
+            if has_table_of_contents and toc_table_indices:
+                tables_to_check = toc_table_indices
+            else:
+                tables_to_check = range(len(doc.tables))
+            
+            for table_idx in tables_to_check:
+                if table_idx >= len(doc.tables):
+                    continue
+                table = doc.tables[table_idx]
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
                         cell_text = cell.text.strip()
+                        cell_text_normalized = " ".join(cell_text.split())
                         
                         # Проверяем, содержит ли ячейка старый текст заголовка
                         # Учитываем, что в содержании может быть только часть текста (без номера или с номером страницы)
-                        if old_heading_text in cell_text or cell_text in old_heading_text:
+                        # Сравниваем как оригинальные тексты, так и нормализованные
+                        text_found = (
+                            old_heading_text in cell_text or 
+                            cell_text in old_heading_text or
+                            old_heading_normalized in cell_text_normalized or
+                            cell_text_normalized in old_heading_normalized
+                        )
+                        
+                        # Также проверяем частичное совпадение (без номера главы)
+                        if not text_found:
+                            # Убираем номер из начала для сравнения
+                            old_heading_no_num = re.sub(r'^(Глава|ГЛАВА|Раздел|РАЗДЕЛ)?\s*\d+\.?\s*', '', old_heading_text, flags=re.IGNORECASE).strip()
+                            cell_text_no_num = re.sub(r'^\d+\.?\s*', '', cell_text).strip()
+                            if old_heading_no_num and (
+                                old_heading_no_num in cell_text_no_num or 
+                                cell_text_no_num in old_heading_no_num
+                            ):
+                                text_found = True
+                                logger.info(f"   🔍 Найдено частичное совпадение (без номера): '{old_heading_no_num}' в '{cell_text_no_num}'")
+                        
+                        if text_found:
                             # Найдено совпадение в ячейке содержания
-                            logger.info(f"   📋 Найдено в содержании (таблица {table_idx}, строка {row_idx}, ячейка {cell_idx}): '{cell_text}'")
+                            logger.info(f"   📋 Найдено в содержании (таблица {table_idx}, строка {row_idx}, ячейка {cell_idx}): '{cell_text[:100]}...'")
                             
                             # Определяем, какая часть ячейки содержит заголовок
                             # В содержании может быть формат: "1. Название раздела ........ 5"
                             # Или просто: "1. Название раздела"
                             
                             # Ищем позицию старого текста в ячейке
+                            # Сначала пробуем точное совпадение
                             if old_heading_text in cell_text:
+                                cell_text_to_replace = cell_text
+                                old_text_to_replace = old_heading_text
+                            elif old_heading_normalized in cell_text_normalized:
+                                cell_text_to_replace = cell_text_normalized
+                                old_text_to_replace = old_heading_normalized
+                            else:
+                                # Пробуем частичное совпадение (без номера)
+                                old_heading_no_num = re.sub(r'^(Глава|ГЛАВА|Раздел|РАЗДЕЛ)?\s*\d+\.?\s*', '', old_heading_text, flags=re.IGNORECASE).strip()
+                                cell_text_no_num = re.sub(r'^\d+\.?\s*', '', cell_text).strip()
+                                if old_heading_no_num in cell_text_no_num:
+                                    cell_text_to_replace = cell_text
+                                    old_text_to_replace = old_heading_no_num
+                                else:
+                                    cell_text_to_replace = cell_text
+                                    old_text_to_replace = old_heading_text
+                            
+                            if old_text_to_replace in cell_text_to_replace:
                                 # Заменяем старый текст на новый
-                                new_cell_text = cell_text.replace(old_heading_text, new_heading_text, 1)
+                                new_cell_text = cell_text_to_replace.replace(old_text_to_replace, new_heading_normalized, 1)
+                                
+                                # Если исходный текст был нормализован, восстанавливаем оригинальный формат
+                                if cell_text_to_replace != cell_text:
+                                    # Пробуем сохранить форматирование (точки, пробелы и т.д.)
+                                    # Это упрощенный подход - в идеале нужно анализировать структуру ячейки
+                                    pass  # Используем уже замененный текст
                                 
                                 # Обновляем ячейку (очищаем и записываем новый текст)
                                 cell.text = new_cell_text
@@ -10153,6 +10844,67 @@ class DocumentChangeAgent:
         except ValueError:
             style_name = ""
         return style_name.startswith("Heading")
+
+    @staticmethod
+    def _insert_comment_after_table(doc: Document, table_idx: int, text: str) -> bool:
+        """
+        Вставляет комментарий сразу после указанной таблицы.
+        
+        Args:
+            doc: Объект документа
+            table_idx: Индекс таблицы
+            text: Текст комментария
+        
+        Returns:
+            True если комментарий успешно вставлен
+        """
+        if table_idx >= len(doc.tables):
+            return False
+        
+        try:
+            from docx.oxml.ns import qn
+            from docx.oxml import OxmlElement
+            
+            # Получаем элемент таблицы
+            table = doc.tables[table_idx]
+            table_element = table._element
+            
+            # Получаем родительский элемент (body документа)
+            parent = table_element.getparent()
+            if parent is None:
+                return False
+            
+            # Создаем новый элемент параграфа напрямую через OxmlElement
+            new_p = OxmlElement('w:p')
+            
+            # Создаем свойства run (курсив, синий цвет)
+            rPr = OxmlElement('w:rPr')
+            italic = OxmlElement('w:i')
+            rPr.append(italic)
+            
+            # Добавляем синий цвет для комментариев
+            color = OxmlElement('w:color')
+            color.set(qn('w:val'), '0000FF')
+            rPr.append(color)
+            
+            # Создаем run элемент
+            run = OxmlElement('w:r')
+            run.append(rPr)
+            
+            # Создаем текстовый элемент
+            t = OxmlElement('w:t')
+            t.text = f"[Комментарий: {text}]"
+            run.append(t)
+            
+            new_p.append(run)
+            
+            # Вставляем параграф сразу после таблицы
+            table_element.addnext(new_p)
+            
+            return True
+        except Exception as e:
+            logger.warning(f"Ошибка при вставке комментария после таблицы: {e}")
+            return False
 
     def _find_section_end(self, doc: Document, start_index: int) -> int:
         """

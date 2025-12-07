@@ -46,6 +46,7 @@ class MCPTextMatch(BaseModel):
 
     paragraph_index: int
     text: str
+    normalized_match: bool = False  # Флаг, указывающий что совпадение найдено через нормализацию
 
 
 class MCPClient:
@@ -198,7 +199,48 @@ class MCPClient:
         old_text: str,
         new_text: str,
         paragraph_index: Optional[int] = None,
+        comment: Optional[str] = None,
+        table_index: Optional[int] = None,
     ) -> bool:
+        """
+        Intelligently replace text in document with smart distribution for tables.
+        
+        Args:
+            filename: Path to document
+            old_text: Text to search for
+            new_text: Text to replace with
+            paragraph_index: Optional paragraph index (ignored for tables)
+            comment: Optional comment to add after table if change is in table
+            table_index: Optional specific table index to search in (if specified, only this table is searched)
+        """
+        # Сначала пробуем новую интеллектуальную функцию replace_text
+        try:
+            arguments: Dict[str, Any] = {
+                "filename": filename,
+                "old_text": old_text,
+                "new_text": new_text,
+                "match_case": True,
+            }
+            
+            # Если указан комментарий, передаем его
+            if comment:
+                arguments["comment"] = comment
+            
+            # Если указан конкретный индекс таблицы, передаем его
+            if table_index is not None:
+                arguments["table_index"] = table_index
+            
+            result = await self._call_tool("replace_text", arguments)
+            
+            if self._message_is_successful(result.text):
+                logger.info(f"✅ Интеллектуальная замена выполнена: {result.text}")
+                return True
+            else:
+                logger.info(f"Интеллектуальная замена не сработала, пробуем стандартную замену")
+        except Exception as e:
+            logger.warning(f"Ошибка при интеллектуальной замене: {e}, пробуем стандартную замену")
+        
+        # Fallback на стандартную замену
         arguments: Dict[str, Any] = {
             "filename": filename,
             "find_text": old_text,
@@ -208,7 +250,7 @@ class MCPClient:
         if paragraph_index is not None and paragraph_index >= 0:
             arguments["paragraph_index"] = paragraph_index
 
-        # Сначала пробуем стандартную замену через MCP
+        # Пробуем стандартную замену через MCP
         try:
             result = await self._call_tool("search_and_replace", arguments)
             
